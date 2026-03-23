@@ -5,12 +5,16 @@
 
 ---
 
-## Critical fix applied
+## Fixes applied
 
-**Session cookie `secure` flag** (`backend/app/main.py:191–198`) — fixed.
-`secure=False` was hardcoded, transmitting the session cookie over plain HTTP.
-Now reads `ENVIRONMENT` env var and sets `secure=True` in any non-development environment.
-Set `ENVIRONMENT=production` in your deployment; leave it unset (or `development`) locally.
+| Fix | File | Status |
+|---|---|---|
+| Session cookie `secure` flag | `backend/app/main.py` | Fixed — reads `ENVIRONMENT` env var; set `ENVIRONMENT=production` in deployment |
+| CORS policy | `backend/app/main.py` | Fixed — explicit `CORSMiddleware`; configure origins via `ALLOWED_ORIGINS` env var |
+| Login rate limiting | `backend/app/main.py` | Fixed — in-memory per-IP limiter, 10 req/60 s, `LOGIN_RATE_LIMIT` env var overrides limit |
+| Input length validation | `backend/app/main.py` | Fixed — `Field(max_length=...)` on all Pydantic request models |
+
+All four fixes have passing tests (125 backend, 55 frontend, 96.5% backend coverage).
 
 ---
 
@@ -18,7 +22,7 @@ Set `ENVIRONMENT=production` in your deployment; leave it unset (or `development
 
 | Category | Count |
 |---|---|
-| Security | 4 issues (1 fixed, 3 open) |
+| Security | 4 issues — all fixed |
 | Code quality | 7 issues |
 | Test coverage | 1 blocker + 2 gaps |
 | Performance | 4 issues |
@@ -28,44 +32,21 @@ Set `ENVIRONMENT=production` in your deployment; leave it unset (or `development
 
 ## Security
 
-### 1. No CORS policy defined
+### 1. CORS policy — FIXED
 
-**File**: `backend/app/main.py` — no `CORSMiddleware`
-
-FastAPI does not add CORS headers by default. This is currently safe, but if the app is placed behind a proxy or a separate dev server is added, the default could become permissive without any audit trail.
-
-**Action**: Add explicit `CORSMiddleware` driven by an env var so the policy is visible and controlled:
-
-```python
-from fastapi.middleware.cors import CORSMiddleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.getenv("ALLOWED_ORIGINS", "").split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-```
+`CORSMiddleware` added. Default allows no origins. Set `ALLOWED_ORIGINS=http://your-origin.com` (comma-separated) in production.
 
 ---
 
-### 2. No login rate limiting
+### 2. Login rate limiting — FIXED
 
-**File**: `backend/app/main.py:180` — `POST /api/auth/login`
-
-No protection against brute-force credential stuffing. Passwords are bcrypt-hashed so online guessing is slow, but there is no server-side enforcement.
-
-**Action**: Add `slowapi` and apply a limit (e.g., 10 requests/minute per IP) to the login endpoint.
+In-memory per-IP limiter at `POST /api/auth/login`: 10 attempts per 60-second rolling window, returns `429`. Override with `LOGIN_RATE_LIMIT` env var.
 
 ---
 
-### 3. No input length validation
+### 3. Input length validation — FIXED
 
-**Files**: `backend/app/main.py` Pydantic request models
-
-Board names, card titles, column titles, and chat messages have no `max_length`. This allows arbitrarily large payloads that could bloat the database or slow bcrypt.
-
-**Action**: Add `Field(min_length=1, max_length=256)` (or appropriate limits) to the relevant fields in `CreateBoardPayload`, `CreateCardPayload`, `UpdateCardPayload`, `RenameColumnPayload`, `AIChatPayload`, and the admin user payloads.
+`Field(max_length=...)` applied to all Pydantic request models: usernames 100, passwords 256, board/column names 256, card titles 512, card details 10 000, chat messages 4 000.
 
 ---
 

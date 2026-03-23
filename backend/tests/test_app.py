@@ -855,6 +855,106 @@ def test_get_chat_board_not_found(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+# --- Rate limiting ---
+
+
+def test_login_rate_limit_blocks_excess_attempts(client: TestClient) -> None:
+    import app.main as main_module
+
+    main_module._LOGIN_RATE_LIMIT_MAX = 3
+
+    for _ in range(3):
+        client.post("/api/auth/login", json={"username": "user", "password": "wrong"})
+
+    response = client.post("/api/auth/login", json={"username": "user", "password": "password"})
+    assert response.status_code == 429
+    assert "Too many login attempts" in response.json()["detail"]
+
+
+def test_login_rate_limit_resets_after_window(client: TestClient) -> None:
+    import app.main as main_module
+
+    main_module._LOGIN_RATE_LIMIT_MAX = 2
+    main_module._LOGIN_RATE_LIMIT_WINDOW = 0  # zero-second window: all old attempts expire immediately
+
+    for _ in range(2):
+        client.post("/api/auth/login", json={"username": "user", "password": "wrong"})
+
+    # Window has expired, so this should succeed
+    response = client.post("/api/auth/login", json={"username": "user", "password": "password"})
+    assert response.status_code == 200
+
+
+# --- CORS ---
+
+
+def test_cors_no_header_when_origins_not_configured(client: TestClient) -> None:
+    response = client.get("/health", headers={"Origin": "http://evil.example"})
+    assert "access-control-allow-origin" not in response.headers
+
+
+def test_cors_header_present_when_origin_configured(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PM_DB_PATH", str(tmp_path / "db-cors.sqlite"))
+    monkeypatch.setenv("ALLOWED_ORIGINS", "http://localhost:3000")
+    import app.main as main_module
+    reload(main_module)
+    cors_client = TestClient(main_module.app)
+    response = cors_client.get("/health", headers={"Origin": "http://localhost:3000"})
+    assert response.headers.get("access-control-allow-origin") == "http://localhost:3000"
+
+
+# --- Input length validation ---
+
+
+def test_login_rejects_oversized_username(client: TestClient) -> None:
+    response = client.post("/api/auth/login", json={"username": "x" * 101, "password": "pw"})
+    assert response.status_code == 422
+
+
+def test_create_board_rejects_oversized_name(client: TestClient) -> None:
+    login(client)
+    response = client.post("/api/boards", json={"name": "x" * 257})
+    assert response.status_code == 422
+
+
+def test_create_card_rejects_oversized_title(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+    response = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "x" * 513},
+    )
+    assert response.status_code == 422
+
+
+def test_create_card_rejects_oversized_details(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+    response = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "ok", "details": "x" * 10001},
+    )
+    assert response.status_code == 422
+
+
+def test_ai_chat_rejects_oversized_message(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.post("/api/ai/chat", json={"message": "x" * 4001, "boardId": board_id})
+    assert response.status_code == 422
+
+
+def test_admin_create_user_rejects_oversized_username(client: TestClient) -> None:
+    login(client)
+    response = client.post(
+        "/api/admin/users",
+        json={"username": "x" * 101, "password": "pw", "role": "user"},
+    )
+    assert response.status_code == 422
+
+
 @pytest.mark.skipif(
     os.getenv("PM_RUN_OPENROUTER_SMOKE") != "1" or not os.getenv("OPENROUTER_API_KEY"),
     reason="Set PM_RUN_OPENROUTER_SMOKE=1 and OPENROUTER_API_KEY to run real connectivity smoke test",

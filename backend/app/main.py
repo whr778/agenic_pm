@@ -1,11 +1,14 @@
+from collections import defaultdict
 from pathlib import Path
 import json
 import os
+import time
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import db
 from app import ai_schema
@@ -18,47 +21,75 @@ SESSION_COOKIE_NAME = "pm_session"
 
 
 class LoginPayload(BaseModel):
-    username: str
-    password: str
+    username: str = Field(max_length=100)
+    password: str = Field(max_length=256)
 
 
 class UpdateBoardPayload(BaseModel):
-    name: str
+    name: str = Field(max_length=256)
 
 
 class RenameColumnPayload(BaseModel):
-    title: str
+    title: str = Field(max_length=256)
 
 
 class CreateCardPayload(BaseModel):
-    columnId: str
-    title: str
-    details: str = ""
+    columnId: str = Field(max_length=20)
+    title: str = Field(max_length=512)
+    details: str = Field(default="", max_length=10000)
 
 
 class UpdateCardPayload(BaseModel):
-    title: str
-    details: str = ""
+    title: str = Field(max_length=512)
+    details: str = Field(default="", max_length=10000)
 
 
 class MoveCardPayload(BaseModel):
-    toColumnId: str
+    toColumnId: str = Field(max_length=20)
     toIndex: int
 
 
 class ConnectivityPayload(BaseModel):
-    prompt: str = "2+2"
+    prompt: str = Field(default="2+2", max_length=1000)
 
 
 class CreateBoardPayload(BaseModel):
-    name: str
+    name: str = Field(max_length=256)
 
 
 class AIChatPayload(BaseModel):
-    message: str
-    boardId: str
+    message: str = Field(max_length=4000)
+    boardId: str = Field(max_length=20)
 
 app = FastAPI(title="PM MVP Backend", version="0.1.0")
+
+_origins_raw = os.getenv("ALLOWED_ORIGINS", "")
+_allowed_origins = [o.strip() for o in _origins_raw.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# In-memory login rate limiter: max attempts per IP per rolling window.
+# State is module-level so it resets on reload (useful in tests).
+_login_attempts: dict[str, list[float]] = defaultdict(list)
+_LOGIN_RATE_LIMIT_MAX = int(os.getenv("LOGIN_RATE_LIMIT", "10"))
+_LOGIN_RATE_LIMIT_WINDOW = 60  # seconds
+
+
+def _check_login_rate_limit(ip: str) -> None:
+    now = time.time()
+    cutoff = now - _LOGIN_RATE_LIMIT_WINDOW
+    recent = [t for t in _login_attempts[ip] if t > cutoff]
+    recent.append(now)
+    _login_attempts[ip] = recent
+    if len(recent) > _LOGIN_RATE_LIMIT_MAX:
+        raise HTTPException(status_code=429, detail="Too many login attempts. Please try again later.")
+
+
 db.init_db()
 
 
@@ -178,7 +209,9 @@ def hello() -> dict[str, object]:
 
 
 @app.post("/api/auth/login")
-def login(payload: LoginPayload, response: Response) -> dict[str, object]:
+def login(payload: LoginPayload, request: Request, response: Response) -> dict[str, object]:
+    ip = request.client.host if request.client else "unknown"
+    _check_login_rate_limit(ip)
     user = db.get_user_by_username(payload.username)
     if user is None or not db.verify_password(payload.password, str(user["password_hash"])):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -462,14 +495,14 @@ def ai_chat(request: Request, payload: AIChatPayload) -> dict[str, object]:
 
 
 class CreateUserPayload(BaseModel):
-    username: str
-    password: str
+    username: str = Field(max_length=100)
+    password: str = Field(max_length=256)
     role: str = "user"
 
 
 class UpdateUserPayload(BaseModel):
-    username: str | None = None
-    password: str | None = None
+    username: str | None = Field(default=None, max_length=100)
+    password: str | None = Field(default=None, max_length=256)
     role: str | None = None
     suspended: bool | None = None
 
