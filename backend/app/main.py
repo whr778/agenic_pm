@@ -188,12 +188,13 @@ def login(payload: LoginPayload, response: Response) -> dict[str, object]:
     session_id = str(uuid4())
     db.create_session(session_id, payload.username)
     db.cleanup_expired_sessions()
+    is_production = os.getenv("ENVIRONMENT", "development") != "development"
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session_id,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=is_production,
         path="/",
     )
     return {
