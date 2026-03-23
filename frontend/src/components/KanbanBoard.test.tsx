@@ -219,7 +219,7 @@ describe("KanbanBoard", () => {
     render(<KanbanBoard boardId="1" />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
-    expect(screen.getAllByTestId(/column-/i)).toHaveLength(5);
+    expect(screen.queryAllByTestId(/column-/i)).toHaveLength(0);
   });
 
   it("sends chat and refreshes board from AI response", async () => {

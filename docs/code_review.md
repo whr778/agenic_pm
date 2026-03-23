@@ -13,8 +13,18 @@
 | CORS policy | `backend/app/main.py` | Fixed — explicit `CORSMiddleware`; configure origins via `ALLOWED_ORIGINS` env var |
 | Login rate limiting | `backend/app/main.py` | Fixed — in-memory per-IP limiter, 10 req/60 s, `LOGIN_RATE_LIMIT` env var overrides limit |
 | Input length validation | `backend/app/main.py` | Fixed — `Field(max_length=...)` on all Pydantic request models |
+| `apply_updates_atomically` duplication | `backend/app/db.py` | Fixed — extracted 6 connection-scoped private helpers; public functions and atomic updater both delegate to them |
+| Double DB lookups per request | `backend/app/main.py` | Fixed — `_require_user` now returns the full user row; `_require_user_id` and `_require_admin` read from it without a second query |
+| `assert` in `init_db` | `backend/app/db.py` | Fixed — replaced with explicit `if row is None: raise RuntimeError(...)` |
+| Silent `loadBoards` failure | `frontend/src/app/page.tsx` | Fixed — bare `catch {}` replaced with `catch (err) { console.error(...) }` |
+| `board ?? initialData` fallback | `frontend/src/components/KanbanBoard.tsx` | Fixed — `handleSendChat` only updates board state when `payload.board` is present; load-failure renders an error state instead of placeholder data |
+| Index-based chat message keys | `frontend/src/components/KanbanBoard.tsx` | Fixed — optimistic messages use `crypto.randomUUID()` |
+| Magic number `+1000` in reorder | `backend/app/db.py` | Fixed — comment explains the UNIQUE constraint workaround and the `< 1000 cards` invariant |
+| Floating Docker base image tags | `Dockerfile` | Fixed — pinned to `node:22.14-alpine3.21` and `python:3.12.9-slim` |
+| Unpinned `uv` in Dockerfile | `Dockerfile` | Fixed — `pip install "uv==0.6.14"` |
+| `bcrypt` unbounded above 4.x | `backend/pyproject.toml` | Fixed — `bcrypt>=4.0.0,<5.0.0` |
 
-All four fixes have passing tests (125 backend, 55 frontend, 96.5% backend coverage).
+All fixes have passing tests (125 backend, 55 frontend, 96.75% backend coverage).
 
 ---
 
@@ -23,10 +33,10 @@ All four fixes have passing tests (125 backend, 55 frontend, 96.5% backend cover
 | Category | Count |
 |---|---|
 | Security | 4 issues — all fixed |
-| Code quality | 7 issues |
+| Code quality | 7 issues — all fixed |
 | Test coverage | 1 blocker + 2 gaps |
 | Performance | 4 issues |
-| Infrastructure | 3 issues |
+| Infrastructure | 3 issues — all fixed |
 
 ---
 
@@ -67,7 +77,7 @@ These strings are displayed in the chat sidebar as system messages. They expose 
 
 ## Code Quality
 
-### 5. `apply_updates_atomically` duplicates all CRUD logic
+### 5. `apply_updates_atomically` duplicates all CRUD logic — FIXED
 
 **File**: `backend/app/db.py:787–912`
 
@@ -77,7 +87,7 @@ These strings are displayed in the chat sidebar as system messages. They expose 
 
 ---
 
-### 6. Double (and triple) DB lookups per authenticated request
+### 6. Double (and triple) DB lookups per authenticated request — FIXED
 
 **File**: `backend/app/main.py:65–93`
 
@@ -87,7 +97,7 @@ These strings are displayed in the chat sidebar as system messages. They expose 
 
 ---
 
-### 7. `assert` used for invariants in `init_db`
+### 7. `assert` used for invariants in `init_db` — FIXED
 
 **File**: `backend/app/db.py:213, 224, 225, 240, 241`
 
@@ -103,7 +113,7 @@ Python's `-O` (optimize) flag disables assertions, turning these into silent no-
 
 ---
 
-### 8. Silent `loadBoards` failure in `page.tsx`
+### 8. Silent `loadBoards` failure in `page.tsx` — FIXED
 
 **File**: `frontend/src/app/page.tsx:40–42`
 
@@ -119,7 +129,7 @@ Board loading failure is silently swallowed. The user sees an empty board list w
 
 ---
 
-### 9. `board ?? initialData` fallback silently shows placeholder data
+### 9. `board ?? initialData` fallback silently shows placeholder data — FIXED
 
 **File**: `frontend/src/components/KanbanBoard.tsx:280, 312`
 
@@ -130,7 +140,7 @@ In the render: `const safeBoard = board ?? initialData` — if loading fails, th
 
 ---
 
-### 10. Index-based keys on chat messages
+### 10. Index-based keys on chat messages — FIXED
 
 **File**: `frontend/src/components/KanbanBoard.tsx:411`
 
@@ -144,7 +154,7 @@ Optimistic messages (added locally in `handleSendChat`) never have an `id`, so e
 
 ---
 
-### 11. Magic number `+1000` in card reorder
+### 11. Magic number `+1000` in card reorder — FIXED
 
 **File**: `backend/app/db.py:676, 694, 697`
 
@@ -243,7 +253,7 @@ CREATE INDEX IF NOT EXISTS idx_cards_column_position ON cards (column_id, positi
 
 ## Infrastructure
 
-### 19. Floating Docker base image tags
+### 19. Floating Docker base image tags — FIXED
 
 **File**: `Dockerfile:1, 12`
 
@@ -258,7 +268,7 @@ Both tags resolve to different images as new patch releases are published. Build
 
 ---
 
-### 20. `uv` installed without version pin in Dockerfile
+### 20. `uv` installed without version pin in Dockerfile — FIXED
 
 **File**: `Dockerfile:19`
 
@@ -272,7 +282,7 @@ Installs the latest `uv` release. A breaking change in `uv` would silently chang
 
 ---
 
-### 21. `bcrypt` dependency unbounded above 4.x
+### 21. `bcrypt` dependency unbounded above 4.x — FIXED
 
 **File**: `backend/pyproject.toml:7`
 

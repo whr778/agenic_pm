@@ -93,7 +93,7 @@ def _check_login_rate_limit(ip: str) -> None:
 db.init_db()
 
 
-def _require_user(request: Request) -> str:
+def _require_user(request: Request):  # returns sqlite3.Row
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
     username = db.get_session(session_id) if session_id else None
     if not username:
@@ -103,22 +103,15 @@ def _require_user(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Not authenticated")
     if user["suspended"]:
         raise HTTPException(status_code=403, detail="Account suspended")
-    return username
+    return user
 
 
 def _require_user_id(request: Request) -> int:
-    username = _require_user(request)
-    user = db.get_user_by_username(username)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    return int(user["id"])
+    return int(_require_user(request)["id"])
 
 
 def _require_admin(request: Request) -> int:
-    username = _require_user(request)
-    user = db.get_user_by_username(username)
-    if user is None:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = _require_user(request)
     if str(user["role"]) != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return int(user["id"])

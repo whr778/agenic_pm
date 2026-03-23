@@ -210,7 +210,8 @@ def init_db() -> None:
             "SELECT id FROM users WHERE username = ?",
             ("user",),
         ).fetchone()
-        assert user_row is not None
+        if user_row is None:
+            raise RuntimeError("Default user missing after insert — database may be corrupt")
         user_id = int(user_row["id"])
 
         connection.execute(
@@ -221,7 +222,8 @@ def init_db() -> None:
             "SELECT id FROM boards WHERE user_id = ?",
             (user_id,),
         ).fetchone()
-        assert board_row is not None
+        if board_row is None:
+            raise RuntimeError("Default board missing after insert — database may be corrupt")
         board_id = int(board_row["id"])
 
         for index, (key, title) in enumerate(FIXED_COLUMNS):
@@ -237,7 +239,8 @@ def init_db() -> None:
             "SELECT COUNT(*) AS count FROM cards WHERE board_id = ?",
             (board_id,),
         ).fetchone()
-        assert card_count is not None
+        if card_count is None:
+            raise RuntimeError("Card count query returned no row — database may be corrupt")
 
         if int(card_count["count"]) == 0:
             column_rows = connection.execute(
@@ -519,129 +522,37 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
 
 
 def update_board_name(user_id: int, board_id: int, name: str) -> dict[str, str]:
-    normalized = _normalize_non_empty(name, "Board name")
-
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
-        connection.execute(
-            """
-            UPDATE boards
-            SET name = ?, updated_at = datetime('now')
-            WHERE id = ?
-            """,
-            (normalized, board_id),
-        )
+        normalized = _rename_board_conn(connection, board_id, name)
     return {"boardId": str(board_id), "name": normalized}
 
 
 def rename_column(user_id: int, board_id: int, column_id: int, title: str) -> dict[str, str]:
-    normalized = _normalize_non_empty(title, "Column title")
-
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
-
-        row = connection.execute(
-            "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
-            (column_id, board_id),
-        ).fetchone()
-        if row is None:
-            raise NotFoundError("Column not found")
-
-        connection.execute(
-            """
-            UPDATE board_columns
-            SET title = ?, updated_at = datetime('now')
-            WHERE id = ?
-            """,
-            (normalized, column_id),
-        )
-
+        normalized = _rename_column_conn(connection, board_id, column_id, title)
     return {"id": str(column_id), "title": normalized}
 
 
 def create_card(user_id: int, board_id: int, column_id: int, title: str, details: str) -> dict[str, str]:
-    normalized_title = _normalize_non_empty(title, "Card title")
-    normalized_details = details.strip()
-
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
-
-        row = connection.execute(
-            "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
-            (column_id, board_id),
-        ).fetchone()
-        if row is None:
-            raise NotFoundError("Column not found")
-
-        position_row = connection.execute(
-            "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM cards WHERE column_id = ?",
-            (column_id,),
-        ).fetchone()
-        assert position_row is not None
-        position = int(position_row["next_pos"])
-
-        cursor = connection.execute(
-            """
-            INSERT INTO cards (board_id, column_id, title, details, position)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (board_id, column_id, normalized_title, normalized_details, position),
-        )
-        card_id = int(cursor.lastrowid)
-
-    return {
-        "id": str(card_id),
-        "columnId": str(column_id),
-        "title": normalized_title,
-        "details": normalized_details,
-    }
+        card_id, norm_title, norm_details = _create_card_conn(connection, board_id, column_id, title, details)
+    return {"id": str(card_id), "columnId": str(column_id), "title": norm_title, "details": norm_details}
 
 
 def update_card(user_id: int, board_id: int, card_id: int, title: str, details: str) -> dict[str, str]:
-    normalized_title = _normalize_non_empty(title, "Card title")
-    normalized_details = details.strip()
-
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
-
-        card = connection.execute(
-            "SELECT id FROM cards WHERE id = ? AND board_id = ?",
-            (card_id, board_id),
-        ).fetchone()
-        if card is None:
-            raise NotFoundError("Card not found")
-
-        connection.execute(
-            """
-            UPDATE cards
-            SET title = ?, details = ?, updated_at = datetime('now')
-            WHERE id = ?
-            """,
-            (normalized_title, normalized_details, card_id),
-        )
-
-    return {"id": str(card_id), "title": normalized_title, "details": normalized_details}
+        norm_title, norm_details = _update_card_conn(connection, board_id, card_id, title, details)
+    return {"id": str(card_id), "title": norm_title, "details": norm_details}
 
 
 def delete_card(user_id: int, board_id: int, card_id: int) -> None:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
-
-        card = connection.execute(
-            "SELECT id, column_id, position FROM cards WHERE id = ? AND board_id = ?",
-            (card_id, board_id),
-        ).fetchone()
-        if card is None:
-            raise NotFoundError("Card not found")
-
-        column_id = int(card["column_id"])
-        position = int(card["position"])
-
-        connection.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-        connection.execute(
-            "UPDATE cards SET position = position - 1 WHERE column_id = ? AND position > ?",
-            (column_id, position),
-        )
+        _delete_card_conn(connection, board_id, card_id)
 
 
 def _reorder_card(
@@ -672,6 +583,8 @@ def _reorder_card(
         adjusted = min(target_index, len(reordered))
         reordered.insert(adjusted, card_id)
 
+        # Shift all positions by +1000 to avoid UNIQUE(column_id, position) violations
+        # while writing final positions. Safe as long as a column has fewer than 1000 cards.
         connection.execute(
             "UPDATE cards SET position = position + 1000 WHERE column_id = ?",
             (source_column_id,),
@@ -688,6 +601,7 @@ def _reorder_card(
     adjusted = min(target_index, len(target_without))
     target_without.insert(adjusted, card_id)
 
+    # Shift all positions by +1000 to avoid UNIQUE(column_id, position) violations.
     connection.execute(
         "UPDATE cards SET position = position + 1000 WHERE column_id = ?",
         (source_column_id,),
@@ -717,39 +631,115 @@ def _reorder_card(
     return adjusted
 
 
-def move_card(user_id: int, board_id: int, card_id: int, target_column_id: int, target_index: int) -> dict[str, str]:
-    if target_index < 0:
-        raise ValidationError("Target index must be zero or greater")
+def _rename_board_conn(connection: sqlite3.Connection, board_id: int, name: str) -> str:
+    board_name = _normalize_non_empty(name, "Board name")
+    connection.execute(
+        "UPDATE boards SET name = ?, updated_at = datetime('now') WHERE id = ?",
+        (board_name, board_id),
+    )
+    return board_name
 
+
+def _rename_column_conn(connection: sqlite3.Connection, board_id: int, column_id: int, title: str) -> str:
+    normalized = _normalize_non_empty(title, "Column title")
+    row = connection.execute(
+        "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
+        (column_id, board_id),
+    ).fetchone()
+    if row is None:
+        raise NotFoundError("Column not found")
+    connection.execute(
+        "UPDATE board_columns SET title = ?, updated_at = datetime('now') WHERE id = ?",
+        (normalized, column_id),
+    )
+    return normalized
+
+
+def _create_card_conn(
+    connection: sqlite3.Connection, board_id: int, column_id: int, title: str, details: str
+) -> tuple[int, str, str]:
+    normalized_title = _normalize_non_empty(title, "Card title")
+    normalized_details = details.strip()
+    row = connection.execute(
+        "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
+        (column_id, board_id),
+    ).fetchone()
+    if row is None:
+        raise NotFoundError("Column not found")
+    position_row = connection.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM cards WHERE column_id = ?",
+        (column_id,),
+    ).fetchone()
+    assert position_row is not None
+    position = int(position_row["next_pos"])
+    cursor = connection.execute(
+        "INSERT INTO cards (board_id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
+        (board_id, column_id, normalized_title, normalized_details, position),
+    )
+    return int(cursor.lastrowid), normalized_title, normalized_details
+
+
+def _update_card_conn(
+    connection: sqlite3.Connection, board_id: int, card_id: int, title: str, details: str
+) -> tuple[str, str]:
+    normalized_title = _normalize_non_empty(title, "Card title")
+    normalized_details = details.strip()
+    card = connection.execute(
+        "SELECT id FROM cards WHERE id = ? AND board_id = ?",
+        (card_id, board_id),
+    ).fetchone()
+    if card is None:
+        raise NotFoundError("Card not found")
+    connection.execute(
+        "UPDATE cards SET title = ?, details = ?, updated_at = datetime('now') WHERE id = ?",
+        (normalized_title, normalized_details, card_id),
+    )
+    return normalized_title, normalized_details
+
+
+def _delete_card_conn(connection: sqlite3.Connection, board_id: int, card_id: int) -> None:
+    card = connection.execute(
+        "SELECT id, column_id, position FROM cards WHERE id = ? AND board_id = ?",
+        (card_id, board_id),
+    ).fetchone()
+    if card is None:
+        raise NotFoundError("Card not found")
+    col_id = int(card["column_id"])
+    position = int(card["position"])
+    connection.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+    connection.execute(
+        "UPDATE cards SET position = position - 1 WHERE column_id = ? AND position > ?",
+        (col_id, position),
+    )
+
+
+def _move_card_conn(
+    connection: sqlite3.Connection, board_id: int, card_id: int, to_column_id: int, to_index: int
+) -> int:
+    if to_index < 0:
+        raise ValidationError("Target index must be zero or greater")
+    target_column = connection.execute(
+        "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
+        (to_column_id, board_id),
+    ).fetchone()
+    if target_column is None:
+        raise NotFoundError("Target column not found")
+    card = connection.execute(
+        "SELECT id, column_id FROM cards WHERE id = ? AND board_id = ?",
+        (card_id, board_id),
+    ).fetchone()
+    if card is None:
+        raise NotFoundError("Card not found")
+    source_column_id = int(card["column_id"])
+    return _reorder_card(connection, card_id, source_column_id, to_column_id, to_index)
+
+
+def move_card(user_id: int, board_id: int, card_id: int, target_column_id: int, target_index: int) -> dict[str, str]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
-
-        target_column = connection.execute(
-            "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
-            (target_column_id, board_id),
-        ).fetchone()
-        if target_column is None:
-            raise NotFoundError("Target column not found")
-
-        card = connection.execute(
-            "SELECT id, column_id, position FROM cards WHERE id = ? AND board_id = ?",
-            (card_id, board_id),
-        ).fetchone()
-        if card is None:
-            raise NotFoundError("Card not found")
-
-        source_column_id = int(card["column_id"])
-
         with connection:
-            adjusted = _reorder_card(
-                connection, card_id, source_column_id, target_column_id, target_index
-            )
-
-    return {
-        "id": str(card_id),
-        "columnId": str(target_column_id),
-        "position": str(adjusted),
-    }
+            adjusted = _move_card_conn(connection, board_id, card_id, target_column_id, target_index)
+    return {"id": str(card_id), "columnId": str(target_column_id), "position": str(adjusted)}
 
 
 def list_chat_messages(user_id: int, board_id: int, limit: int = 20) -> list[dict[str, str]]:
@@ -792,124 +782,41 @@ def apply_updates_atomically(user_id: int, board_id: int, updates: list[dict[str
                 update_type = str(update.get("type", ""))
 
                 if update_type == "rename_board":
-                    board_name = _normalize_non_empty(str(update.get("boardName", "")), "Board name")
-                    connection.execute(
-                        """
-                        UPDATE boards
-                        SET name = ?, updated_at = datetime('now')
-                        WHERE id = ?
-                        """,
-                        (board_name, board_id),
+                    _rename_board_conn(connection, board_id, str(update.get("boardName", "")))
+                elif update_type == "rename_column":
+                    _rename_column_conn(
+                        connection, board_id,
+                        int(str(update.get("columnId", ""))),
+                        str(update.get("title", "")),
                     )
-                    continue
-
-                if update_type == "rename_column":
-                    column_id = int(str(update.get("columnId", "")))
-                    title = _normalize_non_empty(str(update.get("title", "")), "Column title")
-                    row = connection.execute(
-                        "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
-                        (column_id, board_id),
-                    ).fetchone()
-                    if row is None:
-                        raise NotFoundError("Column not found")
-                    connection.execute(
-                        """
-                        UPDATE board_columns
-                        SET title = ?, updated_at = datetime('now')
-                        WHERE id = ?
-                        """,
-                        (title, column_id),
+                elif update_type == "create_card":
+                    _create_card_conn(
+                        connection, board_id,
+                        int(str(update.get("columnId", ""))),
+                        str(update.get("title", "")),
+                        str(update.get("details", "")),
                     )
-                    continue
-
-                if update_type == "create_card":
-                    column_id = int(str(update.get("columnId", "")))
-                    title = _normalize_non_empty(str(update.get("title", "")), "Card title")
-                    details = str(update.get("details", "")).strip()
-                    row = connection.execute(
-                        "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
-                        (column_id, board_id),
-                    ).fetchone()
-                    if row is None:
-                        raise NotFoundError("Column not found")
-                    position_row = connection.execute(
-                        "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM cards WHERE column_id = ?",
-                        (column_id,),
-                    ).fetchone()
-                    assert position_row is not None
-                    position = int(position_row["next_pos"])
-                    connection.execute(
-                        """
-                        INSERT INTO cards (board_id, column_id, title, details, position)
-                        VALUES (?, ?, ?, ?, ?)
-                        """,
-                        (board_id, column_id, title, details, position),
+                elif update_type == "update_card":
+                    _update_card_conn(
+                        connection, board_id,
+                        int(str(update.get("cardId", ""))),
+                        str(update.get("title", "")),
+                        str(update.get("details", "")),
                     )
-                    continue
-
-                if update_type == "update_card":
-                    card_id = int(str(update.get("cardId", "")))
-                    title = _normalize_non_empty(str(update.get("title", "")), "Card title")
-                    details = str(update.get("details", "")).strip()
-                    card = connection.execute(
-                        "SELECT id FROM cards WHERE id = ? AND board_id = ?",
-                        (card_id, board_id),
-                    ).fetchone()
-                    if card is None:
-                        raise NotFoundError("Card not found")
-                    connection.execute(
-                        """
-                        UPDATE cards
-                        SET title = ?, details = ?, updated_at = datetime('now')
-                        WHERE id = ?
-                        """,
-                        (title, details, card_id),
+                elif update_type == "delete_card":
+                    _delete_card_conn(
+                        connection, board_id,
+                        int(str(update.get("cardId", ""))),
                     )
-                    continue
-
-                if update_type == "delete_card":
-                    card_id = int(str(update.get("cardId", "")))
-                    card = connection.execute(
-                        "SELECT id, column_id, position FROM cards WHERE id = ? AND board_id = ?",
-                        (card_id, board_id),
-                    ).fetchone()
-                    if card is None:
-                        raise NotFoundError("Card not found")
-                    column_id = int(card["column_id"])
-                    position = int(card["position"])
-                    connection.execute("DELETE FROM cards WHERE id = ?", (card_id,))
-                    connection.execute(
-                        "UPDATE cards SET position = position - 1 WHERE column_id = ? AND position > ?",
-                        (column_id, position),
+                elif update_type == "move_card":
+                    _move_card_conn(
+                        connection, board_id,
+                        int(str(update.get("cardId", ""))),
+                        int(str(update.get("toColumnId", ""))),
+                        int(update.get("toIndex", 0)),
                     )
-                    continue
-
-                if update_type == "move_card":
-                    card_id = int(str(update.get("cardId", "")))
-                    to_column_id = int(str(update.get("toColumnId", "")))
-                    to_index = int(update.get("toIndex", 0))
-                    if to_index < 0:
-                        raise ValidationError("Target index must be zero or greater")
-
-                    target_column = connection.execute(
-                        "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
-                        (to_column_id, board_id),
-                    ).fetchone()
-                    if target_column is None:
-                        raise NotFoundError("Target column not found")
-
-                    card = connection.execute(
-                        "SELECT id, column_id FROM cards WHERE id = ? AND board_id = ?",
-                        (card_id, board_id),
-                    ).fetchone()
-                    if card is None:
-                        raise NotFoundError("Card not found")
-
-                    source_column_id = int(card["column_id"])
-                    _reorder_card(connection, card_id, source_column_id, to_column_id, to_index)
-                    continue
-
-                raise ValidationError(f"Unsupported update type: {update_type}")
+                else:
+                    raise ValidationError(f"Unsupported update type: {update_type}")
 
 
 SESSION_LIFETIME_SECONDS = 24 * 60 * 60  # 24 hours

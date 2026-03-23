@@ -30,12 +30,12 @@ retry_command() {
 if ! retry_command 3 3 docker build -t "$IMAGE_NAME" .; then
   echo "Falling back to local-only Docker build (no registry pull)." >&2
 
-  if docker image inspect node:22-alpine >/dev/null 2>&1 \
-    && docker image inspect python:3.12-slim >/dev/null 2>&1; then
+  if docker image inspect node:22.14-alpine3.21 >/dev/null 2>&1 \
+    && docker image inspect python:3.12.9-slim >/dev/null 2>&1; then
     DOCKER_BUILDKIT=0 docker build --pull=false -t "$IMAGE_NAME" .
   else
     echo "Unable to build image: Docker Hub is unreachable and base images are not cached locally." >&2
-    echo "When network is available, run: docker pull node:22-alpine && docker pull python:3.12-slim" >&2
+    echo "When network is available, run: docker pull node:22.14-alpine3.21 && docker pull python:3.12.9-slim" >&2
     exit 1
   fi
 fi

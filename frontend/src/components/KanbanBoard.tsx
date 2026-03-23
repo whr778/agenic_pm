@@ -69,7 +69,6 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
       if (!signal?.aborted) setBoard(payload);
     } catch (loadError) {
       if (signal?.aborted) return;
-      setBoard(initialData);
       setError(loadError instanceof Error ? loadError.message : "Unable to load board");
     } finally {
       if (!signal?.aborted) setLoading(false);
@@ -277,12 +276,14 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
         board?: BoardData;
       };
 
-      setBoard(payload.board ?? initialData);
+      if (payload.board) {
+        setBoard(payload.board);
+      }
       setChatMessages((prev) => {
         const next = [
           ...prev,
-          { role: "user" as const, content: message },
-          { role: "assistant" as const, content: payload.assistantMessage },
+          { id: crypto.randomUUID(), role: "user" as const, content: message },
+          { id: crypto.randomUUID(), role: "assistant" as const, content: payload.assistantMessage },
         ];
         if (payload.updatesError) {
           next.push({ role: "system", content: payload.updatesError });
@@ -309,7 +310,19 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     );
   }
 
-  const safeBoard = board ?? initialData;
+  if (!board) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[var(--surface)] px-6">
+        {error ? (
+          <p className="text-sm font-semibold text-red-600" role="alert">
+            {error}
+          </p>
+        ) : null}
+      </main>
+    );
+  }
+
+  const safeBoard = board;
 
   return (
     <div className="relative overflow-hidden">

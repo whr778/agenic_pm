@@ -37,8 +37,8 @@ export default function Home() {
       if (!selectedBoardId && data.boards.length > 0) {
         setSelectedBoardId(data.boards[0].id);
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error("loadBoards failed", err);
     }
   }, [selectedBoardId]);
 

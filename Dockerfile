@@ -1,4 +1,4 @@
-FROM node:22-alpine AS frontend-builder
+FROM node:22.14-alpine3.21 AS frontend-builder
 
 WORKDIR /frontend
 
@@ -9,14 +9,14 @@ COPY frontend .
 RUN npm run build
 
 
-FROM python:3.12-slim
+FROM python:3.12.9-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir uv
+RUN pip install --no-cache-dir "uv==0.6.14"
 
 COPY backend/pyproject.toml /app/backend/pyproject.toml
 RUN cd /app/backend && uv sync --no-dev
