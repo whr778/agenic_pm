@@ -1,0 +1,879 @@
+from importlib import reload
+import os
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    db_path = tmp_path / "pm-test.db"
+    monkeypatch.setenv("PM_DB_PATH", str(db_path))
+
+    import app.main as main_module
+
+    reload(main_module)
+    return TestClient(main_module.app)
+
+
+def login(client: TestClient) -> None:
+    response = client.post(
+        "/api/auth/login",
+        json={"username": "user", "password": "password"},
+    )
+    assert response.status_code == 200
+
+
+def get_board_id(client: TestClient) -> str:
+    response = client.get("/api/boards")
+    assert response.status_code == 200
+    boards = response.json()["boards"]
+    assert len(boards) >= 1
+    return boards[0]["id"]
+
+
+def test_health_returns_ok(client: TestClient) -> None:
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_hello_returns_message_and_env_flag(client: TestClient) -> None:
+    response = client.get("/api/hello")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["message"] == "Hello from FastAPI"
+    assert isinstance(payload["openrouterConfigured"], bool)
+
+
+def test_root_serves_static_html(client: TestClient) -> None:
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "<!doctype html>" in response.text.lower()
+
+
+def test_login_rejects_invalid_credentials(client: TestClient) -> None:
+    response = client.post(
+        "/api/auth/login",
+        json={"username": "user", "password": "wrong"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_login_session_and_logout_flow(client: TestClient) -> None:
+    login(client)
+
+    session = client.get("/api/auth/session")
+    assert session.status_code == 200
+    assert session.json() == {"authenticated": True, "username": "user", "role": "admin"}
+
+    logout = client.post("/api/auth/logout")
+    assert logout.status_code == 200
+
+    after_logout = client.get("/api/auth/session")
+    assert after_logout.status_code == 200
+    assert after_logout.json() == {"authenticated": False}
+
+
+def test_board_requires_authentication(client: TestClient) -> None:
+    response = client.get("/api/boards")
+    assert response.status_code == 401
+
+
+def test_get_board_returns_seeded_numeric_string_ids(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.get(f"/api/board/{board_id}")
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["boardId"].isdigit()
+    assert payload["name"] == "Main Board"
+    assert len(payload["columns"]) == 5
+    assert all(column["id"].isdigit() for column in payload["columns"])
+    assert all(card_id.isdigit() for column in payload["columns"] for card_id in column["cardIds"])
+    assert all(card["id"].isdigit() for card in payload["cards"].values())
+
+
+def test_update_board_name(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.put(f"/api/board/{board_id}", json={"name": "Roadmap Q2"})
+    assert response.status_code == 200
+    assert response.json()["name"] == "Roadmap Q2"
+
+    board = client.get(f"/api/board/{board_id}").json()
+    assert board["name"] == "Roadmap Q2"
+
+
+def test_rename_column(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    first_column_id = board["columns"][0]["id"]
+
+    response = client.patch(
+        f"/api/boards/{board_id}/columns/{first_column_id}",
+        json={"title": "Ideas"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"id": first_column_id, "title": "Ideas"}
+
+    refreshed = client.get(f"/api/board/{board_id}").json()
+    assert refreshed["columns"][0]["title"] == "Ideas"
+
+
+def test_create_update_move_and_delete_card(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    source_column_id = board["columns"][0]["id"]
+    target_column_id = board["columns"][1]["id"]
+
+    create = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={
+            "columnId": source_column_id,
+            "title": "New card",
+            "details": "Needs review",
+        },
+    )
+    assert create.status_code == 200
+    card_id = create.json()["id"]
+
+    update = client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "Updated card", "details": "Updated details"},
+    )
+    assert update.status_code == 200
+    assert update.json()["title"] == "Updated card"
+
+    move = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/move",
+        json={"toColumnId": target_column_id, "toIndex": 0},
+    )
+    assert move.status_code == 200
+    assert move.json()["columnId"] == target_column_id
+
+    after_move = client.get(f"/api/board/{board_id}").json()
+    assert after_move["columns"][1]["cardIds"][0] == card_id
+    assert after_move["cards"][card_id]["title"] == "Updated card"
+
+    delete = client.delete(f"/api/boards/{board_id}/cards/{card_id}")
+    assert delete.status_code == 200
+
+    after_delete = client.get(f"/api/board/{board_id}").json()
+    assert card_id not in after_delete["cards"]
+    assert card_id not in after_delete["columns"][1]["cardIds"]
+
+
+def test_move_card_within_same_column_reorders(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    first_column = board["columns"][0]
+    assert len(first_column["cardIds"]) >= 2
+    first_card = first_column["cardIds"][0]
+    second_card = first_column["cardIds"][1]
+
+    move = client.post(
+        f"/api/boards/{board_id}/cards/{first_card}/move",
+        json={"toColumnId": first_column["id"], "toIndex": 1},
+    )
+    assert move.status_code == 200
+
+    refreshed = client.get(f"/api/board/{board_id}").json()
+    ids = refreshed["columns"][0]["cardIds"]
+    assert ids[0] == second_card
+    assert ids[1] == first_card
+
+
+def test_non_numeric_ids_are_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.patch(f"/api/boards/{board_id}/columns/col-backlog", json={"title": "Ideas"})
+    assert response.status_code == 400
+
+
+def test_ai_connectivity_requires_auth(client: TestClient) -> None:
+    response = client.post("/api/ai/connectivity", json={"prompt": "2+2"})
+    assert response.status_code == 401
+
+
+def test_ai_connectivity_returns_mocked_openrouter_response(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        assert prompt == "2+2"
+        assert timeout_seconds == 20.0
+        return {
+            "model": "openai/gpt-oss-120b",
+            "response": "4",
+        }
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    response = client.post("/api/ai/connectivity", json={"prompt": "2+2"})
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "model": "openai/gpt-oss-120b",
+        "response": "4",
+    }
+
+
+def test_ai_connectivity_surfaces_openrouter_errors(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        raise main_module.openrouter.OpenRouterError(504, "OpenRouter request timed out")
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    response = client.post("/api/ai/connectivity", json={"prompt": "2+2"})
+    assert response.status_code == 504
+    assert response.json()["detail"] == "OpenRouter request timed out"
+
+
+def test_ai_connectivity_rejects_empty_prompt(client: TestClient) -> None:
+    login(client)
+    response = client.post("/api/ai/connectivity", json={"prompt": "   "})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "prompt cannot be empty"
+
+
+def test_ai_chat_requires_auth(client: TestClient) -> None:
+    response = client.post("/api/ai/chat", json={"message": "help", "boardId": "1"})
+    assert response.status_code == 401
+
+
+def test_ai_chat_returns_message_without_updates(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        assert '"board"' in prompt
+        assert '"conversationHistory"' in prompt
+        return {
+            "model": "openai/gpt-oss-120b",
+            "response": '{"assistantMessage":"No board changes needed","updates":[]}',
+        }
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    response = client.post("/api/ai/chat", json={"message": "what should I do next?", "boardId": board_id})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assistantMessage"] == "No board changes needed"
+    assert payload["appliedUpdates"] is False
+    assert payload["updateCount"] == 0
+    assert payload["updatesError"] is None
+
+
+def test_ai_chat_handles_openrouter_error_as_structured_response(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        raise main_module.openrouter.OpenRouterError(502, "Unable to reach OpenRouter")
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    response = client.post("/api/ai/chat", json={"message": "help", "boardId": board_id})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["appliedUpdates"] is False
+    assert payload["updateCount"] == 0
+    assert payload["assistantMessage"].startswith("I could not reach the AI provider")
+    assert payload["updatesError"] == "Unable to reach OpenRouter"
+
+
+def test_list_boards(client: TestClient) -> None:
+    login(client)
+    response = client.get("/api/boards")
+    assert response.status_code == 200
+    boards = response.json()["boards"]
+    assert len(boards) == 1
+    assert boards[0]["name"] == "Main Board"
+
+
+def test_create_and_delete_board(client: TestClient) -> None:
+    login(client)
+    create = client.post("/api/boards", json={"name": "Sprint Board"})
+    assert create.status_code == 200
+    new_board = create.json()
+    assert new_board["name"] == "Sprint Board"
+    assert len(new_board["columns"]) == 5
+
+    boards = client.get("/api/boards").json()["boards"]
+    assert len(boards) == 2
+
+    delete = client.delete(f"/api/boards/{new_board['boardId']}")
+    assert delete.status_code == 200
+
+    boards_after = client.get("/api/boards").json()["boards"]
+    assert len(boards_after) == 1
+
+
+def test_cannot_delete_last_board(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.delete(f"/api/boards/{board_id}")
+    assert response.status_code == 400
+    assert "Cannot delete the last board" in response.json()["detail"]
+
+
+def test_create_board_rejects_duplicate_name(client: TestClient) -> None:
+    login(client)
+    response = client.post("/api/boards", json={"name": "Main Board"})
+    assert response.status_code == 400
+    assert "already exists" in response.json()["detail"]
+
+
+def test_ai_chat_applies_updates_atomically(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    first_column_id = board["columns"][0]["id"]
+    first_card_id = board["columns"][0]["cardIds"][0]
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        return {
+            "model": "openai/gpt-oss-120b",
+            "response": (
+                "{"
+                '"assistantMessage":"Applied updates",'
+                '"updates":['
+                '{"type":"rename_column","columnId":"' + first_column_id + '","title":"Ideas"},'
+                '{"type":"update_card","cardId":"' + first_card_id + '","title":"Card retitled","details":"Updated by AI"}'
+                "]"
+                "}"
+            ),
+        }
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    response = client.post("/api/ai/chat", json={"message": "please tidy this board", "boardId": board_id})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assistantMessage"] == "Applied updates"
+    assert payload["appliedUpdates"] is True
+    assert payload["updateCount"] == 2
+    assert payload["updatesError"] is None
+
+    refreshed = client.get(f"/api/board/{board_id}").json()
+    assert refreshed["columns"][0]["title"] == "Ideas"
+    assert refreshed["cards"][first_card_id]["title"] == "Card retitled"
+
+
+def test_ai_chat_rejects_malformed_ai_output(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        return {
+            "model": "openai/gpt-oss-120b",
+            "response": "not json",
+        }
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    response = client.post("/api/ai/chat", json={"message": "do something", "boardId": board_id})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["appliedUpdates"] is False
+    assert payload["updateCount"] == 0
+    assert "non-JSON" in payload["updatesError"]
+
+
+def test_chat_history_endpoint_returns_persisted_messages(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        return {
+            "model": "openai/gpt-oss-120b",
+            "response": '{"assistantMessage":"Acknowledged","updates":[]}',
+        }
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    first = client.post("/api/ai/chat", json={"message": "first question", "boardId": board_id})
+    assert first.status_code == 200
+
+    history = client.get(f"/api/chat/{board_id}")
+    assert history.status_code == 200
+    messages = history.json()["messages"]
+    assert any(item["role"] == "user" and item["content"] == "first question" for item in messages)
+    assert any(item["role"] == "assistant" and item["content"] == "Acknowledged" for item in messages)
+
+
+# --- Admin endpoint tests ---
+
+
+def test_admin_list_users(client: TestClient) -> None:
+    login(client)
+    response = client.get("/api/admin/users")
+    assert response.status_code == 200
+    users = response.json()["users"]
+    assert len(users) >= 1
+    assert any(u["username"] == "user" for u in users)
+
+
+def test_admin_create_user(client: TestClient) -> None:
+    login(client)
+    response = client.post(
+        "/api/admin/users",
+        json={"username": "newuser", "password": "newpass", "role": "user"},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["username"] == "newuser"
+    assert payload["role"] == "user"
+    assert payload["suspended"] is False
+
+
+def test_admin_create_user_duplicate_rejected(client: TestClient) -> None:
+    login(client)
+    response = client.post(
+        "/api/admin/users",
+        json={"username": "user", "password": "pass", "role": "user"},
+    )
+    assert response.status_code == 400
+    assert "already exists" in response.json()["detail"]
+
+
+def test_admin_update_user(client: TestClient) -> None:
+    login(client)
+    # Create a user to update
+    create = client.post(
+        "/api/admin/users",
+        json={"username": "toupdate", "password": "pass", "role": "user"},
+    )
+    user_id = create.json()["id"]
+
+    response = client.put(
+        f"/api/admin/users/{user_id}",
+        json={"username": "updated_name"},
+    )
+    assert response.status_code == 200
+    assert response.json()["username"] == "updated_name"
+
+
+def test_admin_update_user_not_found(client: TestClient) -> None:
+    login(client)
+    response = client.put(
+        "/api/admin/users/99999",
+        json={"username": "nobody"},
+    )
+    assert response.status_code == 404
+
+
+def test_admin_cannot_suspend_self(client: TestClient) -> None:
+    login(client)
+    # Get admin's user id
+    users = client.get("/api/admin/users").json()["users"]
+    admin_user = next(u for u in users if u["username"] == "user")
+
+    response = client.put(
+        f"/api/admin/users/{admin_user['id']}",
+        json={"suspended": True},
+    )
+    assert response.status_code == 400
+    assert "Cannot suspend yourself" in response.json()["detail"]
+
+
+def test_admin_cannot_remove_own_admin_role(client: TestClient) -> None:
+    login(client)
+    users = client.get("/api/admin/users").json()["users"]
+    admin_user = next(u for u in users if u["username"] == "user")
+
+    response = client.put(
+        f"/api/admin/users/{admin_user['id']}",
+        json={"role": "user"},
+    )
+    assert response.status_code == 400
+    assert "Cannot remove your own admin role" in response.json()["detail"]
+
+
+def test_admin_delete_user(client: TestClient) -> None:
+    login(client)
+    create = client.post(
+        "/api/admin/users",
+        json={"username": "todelete", "password": "pass", "role": "user"},
+    )
+    user_id = create.json()["id"]
+
+    response = client.delete(f"/api/admin/users/{user_id}")
+    assert response.status_code == 200
+
+    users = client.get("/api/admin/users").json()["users"]
+    assert not any(u["id"] == user_id for u in users)
+
+
+def test_admin_cannot_delete_self(client: TestClient) -> None:
+    login(client)
+    users = client.get("/api/admin/users").json()["users"]
+    admin_user = next(u for u in users if u["username"] == "user")
+
+    response = client.delete(f"/api/admin/users/{admin_user['id']}")
+    assert response.status_code == 400
+    assert "Cannot delete yourself" in response.json()["detail"]
+
+
+def test_admin_delete_user_not_found(client: TestClient) -> None:
+    login(client)
+    response = client.delete("/api/admin/users/99999")
+    assert response.status_code == 404
+
+
+def test_admin_endpoints_require_admin_role(client: TestClient) -> None:
+    login(client)
+    # Create a non-admin user
+    client.post(
+        "/api/admin/users",
+        json={"username": "regular", "password": "pass", "role": "user"},
+    )
+    # Login as that user
+    client.post("/api/auth/logout")
+    client.post(
+        "/api/auth/login",
+        json={"username": "regular", "password": "pass"},
+    )
+
+    assert client.get("/api/admin/users").status_code == 403
+    assert client.post("/api/admin/users", json={"username": "x", "password": "p"}).status_code == 403
+    assert client.put("/api/admin/users/1", json={"username": "x"}).status_code == 403
+    assert client.delete("/api/admin/users/1").status_code == 403
+
+
+# --- Suspended user tests ---
+
+
+def test_suspended_user_cannot_login(client: TestClient) -> None:
+    login(client)
+    create = client.post(
+        "/api/admin/users",
+        json={"username": "suspended_user", "password": "pass", "role": "user"},
+    )
+    user_id = create.json()["id"]
+
+    # Suspend the user
+    client.put(f"/api/admin/users/{user_id}", json={"suspended": True})
+
+    # Logout and try to login as suspended user
+    client.post("/api/auth/logout")
+    response = client.post(
+        "/api/auth/login",
+        json={"username": "suspended_user", "password": "pass"},
+    )
+    assert response.status_code == 403
+    assert "suspended" in response.json()["detail"].lower()
+
+
+def test_suspended_user_session_check_returns_unauthenticated(client: TestClient) -> None:
+    login(client)
+    create = client.post(
+        "/api/admin/users",
+        json={"username": "willsuspend", "password": "pass", "role": "user"},
+    )
+    user_id = create.json()["id"]
+    client.post("/api/auth/logout")
+
+    # Login as the user first
+    client.post(
+        "/api/auth/login",
+        json={"username": "willsuspend", "password": "pass"},
+    )
+    session = client.get("/api/auth/session")
+    assert session.json()["authenticated"] is True
+
+    # Now suspend via admin (login as admin)
+    client.post("/api/auth/logout")
+    login(client)
+    client.put(f"/api/admin/users/{user_id}", json={"suspended": True})
+    client.post("/api/auth/logout")
+
+    # Login as suspended user should fail
+    response = client.post(
+        "/api/auth/login",
+        json={"username": "willsuspend", "password": "pass"},
+    )
+    assert response.status_code == 403
+
+
+# --- Validation/error path tests ---
+
+
+def test_update_board_not_found(client: TestClient) -> None:
+    login(client)
+    response = client.put("/api/board/99999", json={"name": "New Name"})
+    assert response.status_code == 404
+
+
+def test_update_board_empty_name(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.put(f"/api/board/{board_id}", json={"name": "   "})
+    assert response.status_code == 400
+
+
+def test_rename_column_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.patch(
+        f"/api/boards/{board_id}/columns/99999",
+        json={"title": "New Title"},
+    )
+    assert response.status_code == 404
+
+
+def test_rename_column_empty_title(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    col_id = board["columns"][0]["id"]
+    response = client.patch(
+        f"/api/boards/{board_id}/columns/{col_id}",
+        json={"title": "   "},
+    )
+    assert response.status_code == 400
+
+
+def test_create_card_column_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": "99999", "title": "Card"},
+    )
+    assert response.status_code == 404
+
+
+def test_create_card_empty_title(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    col_id = board["columns"][0]["id"]
+    response = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "   "},
+    )
+    assert response.status_code == 400
+
+
+def test_update_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.put(
+        f"/api/boards/{board_id}/cards/99999",
+        json={"title": "Updated"},
+    )
+    assert response.status_code == 404
+
+
+def test_update_card_empty_title(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+    response = client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "   "},
+    )
+    assert response.status_code == 400
+
+
+def test_delete_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.delete(f"/api/boards/{board_id}/cards/99999")
+    assert response.status_code == 404
+
+
+def test_move_card_validation_error(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+    response = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/move",
+        json={"toColumnId": "99999", "toIndex": 0},
+    )
+    assert response.status_code == 404
+
+
+def test_move_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    col_id = board["columns"][0]["id"]
+    response = client.post(
+        f"/api/boards/{board_id}/cards/99999/move",
+        json={"toColumnId": col_id, "toIndex": 0},
+    )
+    assert response.status_code == 404
+
+
+def test_get_board_not_found(client: TestClient) -> None:
+    login(client)
+    response = client.get("/api/board/99999")
+    assert response.status_code == 404
+
+
+def test_delete_board_not_found(client: TestClient) -> None:
+    login(client)
+    response = client.delete("/api/boards/99999")
+    assert response.status_code == 404
+
+
+def test_ai_chat_empty_message(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.post("/api/ai/chat", json={"message": "   ", "boardId": board_id})
+    assert response.status_code == 400
+    assert "message cannot be empty" in response.json()["detail"]
+
+
+def test_ai_chat_schema_validation_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        return {
+            "model": "openai/gpt-oss-120b",
+            "response": '{"assistantMessage":"","updates":[]}',
+        }
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    response = client.post("/api/ai/chat", json={"message": "test", "boardId": board_id})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["appliedUpdates"] is False
+    assert payload["updatesError"] is not None
+    assert "assistantMessage" in payload["updatesError"]
+
+
+def test_ai_chat_code_fenced_json_response(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        return {
+            "model": "openai/gpt-oss-120b",
+            "response": '```json\n{"assistantMessage":"Wrapped in code fence","updates":[]}\n```',
+        }
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    response = client.post("/api/ai/chat", json={"message": "help", "boardId": board_id})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["assistantMessage"] == "Wrapped in code fence"
+
+
+def test_ai_chat_update_apply_failure(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    import app.main as main_module
+
+    def fake_chat_completion(prompt: str, timeout_seconds: float = 20.0) -> dict[str, str]:
+        return {
+            "model": "openai/gpt-oss-120b",
+            "response": '{"assistantMessage":"Will try updates","updates":[{"type":"delete_card","cardId":"99999"}]}',
+        }
+
+    monkeypatch.setattr(main_module.openrouter, "chat_completion", fake_chat_completion)
+
+    response = client.post("/api/ai/chat", json={"message": "delete a card", "boardId": board_id})
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["appliedUpdates"] is False
+    assert payload["updateCount"] == 0
+    assert payload["updatesError"] is not None
+
+
+def test_get_chat_board_not_found(client: TestClient) -> None:
+    login(client)
+    response = client.get("/api/chat/99999")
+    assert response.status_code == 404
+
+
+@pytest.mark.skipif(
+    os.getenv("PM_RUN_OPENROUTER_SMOKE") != "1" or not os.getenv("OPENROUTER_API_KEY"),
+    reason="Set PM_RUN_OPENROUTER_SMOKE=1 and OPENROUTER_API_KEY to run real connectivity smoke test",
+)
+def test_ai_connectivity_real_smoke(client: TestClient) -> None:
+    login(client)
+    response = None
+    for _ in range(3):
+        response = client.post("/api/ai/connectivity", json={"prompt": "2+2"})
+        if response.status_code == 200:
+            break
+        if response.status_code in (502, 504):
+            time.sleep(1)
+            continue
+        break
+
+    assert response is not None
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert isinstance(payload["response"], str)
+    assert payload["response"].strip() != ""
