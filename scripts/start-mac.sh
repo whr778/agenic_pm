@@ -8,6 +8,11 @@ DATA_DIR="$ROOT_DIR/backend/data"
 
 cd "$ROOT_DIR"
 
+if [[ ! -f "$ROOT_DIR/.env" ]]; then
+  echo "Missing .env file at $ROOT_DIR/.env" >&2
+  exit 1
+fi
+
 mkdir -p "$DATA_DIR"
 
 retry_command() {

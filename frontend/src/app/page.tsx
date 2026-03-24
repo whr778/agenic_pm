@@ -19,8 +19,8 @@ const initialState: SessionState = {
 
 export default function Home() {
   const [session, setSession] = useState<SessionState>(initialState);
-  const [username, setUsername] = useState("user");
-  const [password, setPassword] = useState("password");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [boards, setBoards] = useState<BoardSummary[]>([]);
@@ -275,6 +275,7 @@ export default function Home() {
             <input
               className="rounded-lg border border-[var(--stroke)] px-3 py-2 text-xs outline-none ring-[var(--primary-blue)]/30 focus:ring"
               placeholder="New board name"
+              maxLength={256}
               value={newBoardName}
               onChange={(e) => setNewBoardName(e.target.value)}
               onKeyDown={(e) => {

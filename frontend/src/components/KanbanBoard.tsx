@@ -338,6 +338,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
               </p>
               <input
                 className="mt-3 w-full max-w-md bg-transparent font-display text-4xl font-semibold text-[var(--navy-dark)] outline-none"
+                maxLength={256}
                 aria-label="Board name"
                 value={boardNameDraft}
                 onChange={(event) => setBoardNameDraft(event.target.value)}
@@ -441,6 +442,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                   aria-label="AI chat message"
                   className="flex-1 rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none ring-[var(--primary-blue)]/30 focus:ring"
                   placeholder="Ask AI to update the board..."
+                  maxLength={4000}
                   value={chatInput}
                   onChange={(event) => setChatInput(event.target.value)}
                 />

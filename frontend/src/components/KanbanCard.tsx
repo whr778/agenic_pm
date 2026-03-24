@@ -78,6 +78,7 @@ export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCa
                   setIsEditing(false);
                 }
               }}
+              maxLength={512}
               className="w-full rounded-lg border border-[var(--stroke)] px-2 py-1 text-sm font-semibold text-[var(--navy-dark)] outline-none"
               aria-label={`Edit title for ${card.title}`}
             />
@@ -87,6 +88,7 @@ export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCa
             <textarea
               value={draftDetails}
               onChange={(event) => setDraftDetails(event.target.value)}
+              maxLength={10000}
               onKeyDown={(event) => {
                 if (event.key === "Escape") {
                   setDraftTitle(card.title);

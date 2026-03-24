@@ -87,6 +87,29 @@ def _migrate_users_add_columns(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_sessions_to_user_id(connection: sqlite3.Connection) -> None:
+    """Migrate sessions table from username TEXT to user_id INTEGER FK."""
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(sessions)").fetchall()
+    }
+    if "username" in columns and "user_id" not in columns:
+        # Drop all old sessions and recreate the table with user_id
+        connection.executescript(
+            """
+            DROP TABLE IF EXISTS sessions;
+            CREATE TABLE sessions (
+              id TEXT PRIMARY KEY,
+              user_id INTEGER NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              expires_at TEXT NOT NULL,
+              FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+            """
+        )
+
+
 def _migrate_boards_unique_constraint(connection: sqlite3.Connection) -> None:
     """Migrate boards table from UNIQUE(user_id) to UNIQUE(user_id, name)."""
     table_sql = connection.execute(
@@ -184,9 +207,10 @@ def init_db() -> None:
 
             CREATE TABLE IF NOT EXISTS sessions (
               id TEXT PRIMARY KEY,
-              username TEXT NOT NULL,
+              user_id INTEGER NOT NULL,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
-              expires_at TEXT NOT NULL
+              expires_at TEXT NOT NULL,
+              FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
 
             CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
@@ -195,6 +219,7 @@ def init_db() -> None:
 
         _migrate_users_add_columns(connection)
         _migrate_boards_unique_constraint(connection)
+        _migrate_sessions_to_user_id(connection)
 
         default_hash = hash_password("password")
         connection.execute(
@@ -263,6 +288,14 @@ def init_db() -> None:
                     (board_id, column_id, title, details, position),
                 )
                 next_position_by_column[column_id] = position + 1
+
+
+def get_user_by_id(user_id: int) -> sqlite3.Row | None:
+    with get_connection() as connection:
+        return connection.execute(
+            "SELECT id, username, role, suspended, password_hash FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
 
 
 def get_user_by_username(username: str) -> sqlite3.Row | None:
@@ -822,24 +855,25 @@ def apply_updates_atomically(user_id: int, board_id: int, updates: list[dict[str
 SESSION_LIFETIME_SECONDS = 24 * 60 * 60  # 24 hours
 
 
-def create_session(session_id: str, username: str) -> None:
+def create_session(session_id: str, user_id: int) -> None:
     with get_connection() as connection:
         connection.execute(
             """
-            INSERT INTO sessions (id, username, expires_at)
+            INSERT INTO sessions (id, user_id, expires_at)
             VALUES (?, ?, datetime('now', '+' || ? || ' seconds'))
             """,
-            (session_id, username, SESSION_LIFETIME_SECONDS),
+            (session_id, user_id, SESSION_LIFETIME_SECONDS),
         )
 
 
-def get_session(session_id: str) -> str | None:
+def get_session(session_id: str) -> int | None:
+    """Return the user_id for a valid (non-expired) session, or None."""
     with get_connection() as connection:
         row = connection.execute(
-            "SELECT username FROM sessions WHERE id = ? AND expires_at > datetime('now')",
+            "SELECT user_id FROM sessions WHERE id = ? AND expires_at > datetime('now')",
             (session_id,),
         ).fetchone()
-    return str(row["username"]) if row else None
+    return int(row["user_id"]) if row else None
 
 
 def delete_session(session_id: str) -> None:

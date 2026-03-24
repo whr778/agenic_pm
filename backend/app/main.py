@@ -8,6 +8,8 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app import db
@@ -85,9 +87,13 @@ def _check_login_rate_limit(ip: str) -> None:
     cutoff = now - _LOGIN_RATE_LIMIT_WINDOW
     recent = [t for t in _login_attempts[ip] if t > cutoff]
     recent.append(now)
-    _login_attempts[ip] = recent
     if len(recent) > _LOGIN_RATE_LIMIT_MAX:
+        _login_attempts[ip] = recent
         raise HTTPException(status_code=429, detail="Too many login attempts. Please try again later.")
+    if recent:
+        _login_attempts[ip] = recent
+    else:
+        _login_attempts.pop(ip, None)
 
 
 db.init_db()
@@ -95,10 +101,10 @@ db.init_db()
 
 def _require_user(request: Request):  # returns sqlite3.Row
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
-    username = db.get_session(session_id) if session_id else None
-    if not username:
+    user_id = db.get_session(session_id) if session_id else None
+    if user_id is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    user = db.get_user_by_username(username)
+    user = db.get_user_by_id(user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     if user["suspended"]:
@@ -212,7 +218,7 @@ def login(payload: LoginPayload, request: Request, response: Response) -> dict[s
         raise HTTPException(status_code=403, detail="Account suspended")
 
     session_id = str(uuid4())
-    db.create_session(session_id, payload.username)
+    db.create_session(session_id, int(user["id"]))
     db.cleanup_expired_sessions()
     is_production = os.getenv("ENVIRONMENT", "development") != "development"
     response.set_cookie(
@@ -233,13 +239,13 @@ def login(payload: LoginPayload, request: Request, response: Response) -> dict[s
 @app.get("/api/auth/session")
 def auth_session(request: Request) -> dict[str, object]:
     session_id = request.cookies.get(SESSION_COOKIE_NAME)
-    username = db.get_session(session_id) if session_id else None
-    if not username:
+    user_id = db.get_session(session_id) if session_id else None
+    if user_id is None:
         return {"authenticated": False}
-    user = db.get_user_by_username(username)
+    user = db.get_user_by_id(user_id)
     if user is None or user["suspended"]:
         return {"authenticated": False}
-    return {"authenticated": True, "username": username, "role": str(user["role"])}
+    return {"authenticated": True, "username": str(user["username"]), "role": str(user["role"])}
 
 
 @app.post("/api/auth/logout")
@@ -490,13 +496,13 @@ def ai_chat(request: Request, payload: AIChatPayload) -> dict[str, object]:
 class CreateUserPayload(BaseModel):
     username: str = Field(max_length=100)
     password: str = Field(max_length=256)
-    role: str = "user"
+    role: Literal["user", "admin"] = "user"
 
 
 class UpdateUserPayload(BaseModel):
     username: str | None = Field(default=None, max_length=100)
     password: str | None = Field(default=None, max_length=256)
-    role: str | None = None
+    role: Literal["user", "admin"] | None = None
     suspended: bool | None = None
 
 
