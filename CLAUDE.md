@@ -87,3 +87,7 @@ Defined as CSS variables in `frontend/src/app/globals.css`:
 - `docs/PLAN.md` — 12 completed implementation parts with checklists; review before major work
 - `docs/DATABASE_SCHEMA.md` — Full schema with constraints and design rationale
 - `docs/AI_OUTPUT_SCHEMA.md` — AI response format specification
+
+## Detailed Plan
+
+@docs/PLAN.md
