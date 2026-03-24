@@ -15,7 +15,7 @@ import {
 } from "@dnd-kit/core";
 import { KanbanColumn } from "@/components/KanbanColumn";
 import { KanbanCardPreview } from "@/components/KanbanCardPreview";
-import { initialData, type BoardData, type Column } from "@/lib/kanban";
+import { initialData, type BoardData, type Column, type Priority } from "@/lib/kanban";
 import type { MoveDirection } from "@/components/KanbanCard";
 
 export const KanbanBoard = ({ boardId }: { boardId: string }) => {
@@ -208,11 +208,18 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     }
   };
 
-  const handleEditCard = async (cardId: string, title: string, details: string) => {
+  const handleEditCard = async (
+    cardId: string,
+    title: string,
+    details: string,
+    due_date: string | null,
+    priority: Priority | null,
+    labels: string[],
+  ) => {
     try {
       await apiRef.current(`/api/boards/${boardId}/cards/${cardId}`, {
         method: "PUT",
-        body: JSON.stringify({ title, details }),
+        body: JSON.stringify({ title, details, due_date, priority, labels }),
       });
       await loadBoard();
     } catch (editError) {

@@ -11,8 +11,12 @@ def client(tmp_path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     db_path = tmp_path / "pm-test.db"
     monkeypatch.setenv("PM_DB_PATH", str(db_path))
 
+    # Reload the auth router first so the in-memory rate-limit state is reset,
+    # then reload main so it re-registers all routers on the fresh app instance.
+    import app.routers.auth as auth_module
     import app.main as main_module
 
+    reload(auth_module)
     reload(main_module)
     return TestClient(main_module.app)
 
@@ -859,9 +863,9 @@ def test_get_chat_board_not_found(client: TestClient) -> None:
 
 
 def test_login_rate_limit_blocks_excess_attempts(client: TestClient) -> None:
-    import app.main as main_module
+    import app.routers.auth as auth_module
 
-    main_module._LOGIN_RATE_LIMIT_MAX = 3
+    auth_module._LOGIN_RATE_LIMIT_MAX = 3
 
     for _ in range(3):
         client.post("/api/auth/login", json={"username": "user", "password": "wrong"})
@@ -872,10 +876,10 @@ def test_login_rate_limit_blocks_excess_attempts(client: TestClient) -> None:
 
 
 def test_login_rate_limit_resets_after_window(client: TestClient) -> None:
-    import app.main as main_module
+    import app.routers.auth as auth_module
 
-    main_module._LOGIN_RATE_LIMIT_MAX = 2
-    main_module._LOGIN_RATE_LIMIT_WINDOW = 0  # zero-second window: all old attempts expire immediately
+    auth_module._LOGIN_RATE_LIMIT_MAX = 2
+    auth_module._LOGIN_RATE_LIMIT_WINDOW = 0  # zero-second window: all old attempts expire immediately
 
     for _ in range(2):
         client.post("/api/auth/login", json={"username": "user", "password": "wrong"})
@@ -951,6 +955,146 @@ def test_admin_create_user_rejects_oversized_username(client: TestClient) -> Non
     response = client.post(
         "/api/admin/users",
         json={"username": "x" * 101, "password": "pw", "role": "user"},
+    )
+    assert response.status_code == 422
+
+
+# --- Self-registration ---
+
+
+def test_register_creates_suspended_account(client: TestClient) -> None:
+    response = client.post(
+        "/api/auth/register",
+        json={"username": "newuser", "password": "mypassword"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["username"] == "newuser"
+    assert body["role"] == "user"
+    assert body["suspended"] is True
+    assert "administrator" in body["message"].lower()
+
+
+def test_register_suspended_user_cannot_login(client: TestClient) -> None:
+    client.post("/api/auth/register", json={"username": "pending", "password": "pass"})
+    response = client.post("/api/auth/login", json={"username": "pending", "password": "pass"})
+    assert response.status_code == 403
+    assert "suspended" in response.json()["detail"].lower()
+
+
+def test_register_duplicate_username_rejected(client: TestClient) -> None:
+    client.post("/api/auth/register", json={"username": "dupuser", "password": "pass"})
+    response = client.post("/api/auth/register", json={"username": "dupuser", "password": "pass2"})
+    assert response.status_code == 400
+    assert "already exists" in response.json()["detail"].lower()
+
+
+def test_register_empty_username_rejected(client: TestClient) -> None:
+    response = client.post("/api/auth/register", json={"username": "  ", "password": "pass"})
+    assert response.status_code == 400
+
+
+def test_register_admin_can_activate_registered_user(client: TestClient) -> None:
+    client.post("/api/auth/register", json={"username": "activateme", "password": "pass"})
+
+    # Admin activates the user by unsuspending
+    login(client)
+    users = client.get("/api/admin/users").json()["users"]
+    new_user = next(u for u in users if u["username"] == "activateme")
+    assert new_user["suspended"] is True
+
+    client.put(f"/api/admin/users/{new_user['id']}", json={"suspended": False})
+    client.post("/api/auth/logout")
+
+    # Now the user can log in
+    response = client.post("/api/auth/login", json={"username": "activateme", "password": "pass"})
+    assert response.status_code == 200
+
+
+# --- Card metadata: due_date, priority, labels ---
+
+
+def test_create_card_with_metadata(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    cols = client.get(f"/api/board/{board_id}").json()["columns"]
+    col_id = cols[0]["id"]
+
+    response = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={
+            "columnId": col_id,
+            "title": "Metadata card",
+            "details": "Some details",
+            "due_date": "2026-06-30",
+            "priority": "high",
+            "labels": ["frontend", "bug"],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["due_date"] == "2026-06-30"
+    assert body["priority"] == "high"
+    assert body["labels"] == ["frontend", "bug"]
+
+
+def test_update_card_clears_metadata(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    col_id = board["columns"][0]["id"]
+    card_id = board["columns"][0]["cardIds"][0]
+
+    # Set metadata
+    client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "Card", "details": "", "due_date": "2026-06-30", "priority": "low", "labels": ["x"]},
+    )
+
+    # Clear metadata
+    response = client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "Card", "details": "", "due_date": None, "priority": None, "labels": []},
+    )
+    assert response.status_code == 200
+    assert response.json()["due_date"] is None
+    assert response.json()["priority"] is None
+    assert response.json()["labels"] == []
+
+
+def test_board_payload_includes_card_metadata(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    cols = client.get(f"/api/board/{board_id}").json()["columns"]
+    col_id = cols[0]["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={
+            "columnId": col_id,
+            "title": "Tagged",
+            "details": "",
+            "due_date": "2026-12-31",
+            "priority": "critical",
+            "labels": ["release"],
+        },
+    )
+
+    board = client.get(f"/api/board/{board_id}").json()
+    cards = board["cards"]
+    tagged = next(c for c in cards.values() if c["title"] == "Tagged")
+    assert tagged["due_date"] == "2026-12-31"
+    assert tagged["priority"] == "critical"
+    assert tagged["labels"] == ["release"]
+
+
+def test_create_card_invalid_priority_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+    response = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Bad", "details": "", "priority": "urgent"},
     )
     assert response.status_code == 422
 

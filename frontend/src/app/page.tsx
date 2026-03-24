@@ -23,6 +23,8 @@ export default function Home() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [registerSuccess, setRegisterSuccess] = useState<string | null>(null);
   const [boards, setBoards] = useState<BoardSummary[]>([]);
   const [selectedBoardId, setSelectedBoardId] = useState<string | null>(null);
   const [newBoardName, setNewBoardName] = useState("");
@@ -71,7 +73,7 @@ export default function Home() {
     void loadSession();
   }, []);
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+  const handleLogin = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(null);
     setIsSubmitting(true);
@@ -85,7 +87,12 @@ export default function Home() {
       });
 
       if (!response.ok) {
-        setError("Invalid credentials. Use user/password.");
+        const payload = (await response.json()) as { detail?: string };
+        if (response.status === 403) {
+          setError("Your account is pending activation by an administrator.");
+        } else {
+          setError(payload.detail ?? "Invalid credentials.");
+        }
         return;
       }
 
@@ -105,6 +112,38 @@ export default function Home() {
       setIsSubmitting(false);
     }
   };
+
+  const handleRegister = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+    setRegisterSuccess(null);
+    setIsSubmitting(true);
+
+    try {
+      const response = await fetch("/api/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+
+      const payload = (await response.json()) as { detail?: string; message?: string };
+
+      if (!response.ok) {
+        setError(payload.detail ?? "Unable to create account.");
+        return;
+      }
+
+      setRegisterSuccess(payload.message ?? "Account created. Please wait for administrator activation.");
+      setUsername("");
+      setPassword("");
+    } catch {
+      setError("Unable to create account right now.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSubmit = authMode === "login" ? handleLogin : handleRegister;
 
   const handleLogout = async () => {
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
@@ -171,6 +210,7 @@ export default function Home() {
   }
 
   if (!session.authenticated) {
+    const isRegister = authMode === "register";
     return (
       <main className="flex min-h-screen items-center justify-center bg-[var(--surface)] px-6">
         <form
@@ -178,14 +218,16 @@ export default function Home() {
           onSubmit={handleSubmit}
         >
           <p className="text-xs font-semibold uppercase tracking-[0.3em] text-[var(--gray-text)]">
-            Project Management MVP
+            Project Management
           </p>
           <h1 className="mt-3 font-display text-3xl font-semibold text-[var(--navy-dark)]">
-            Sign in
+            {isRegister ? "Create account" : "Sign in"}
           </h1>
-          <p className="mt-2 text-sm text-[var(--gray-text)]">
-            Use user/password to continue.
-          </p>
+          {isRegister ? (
+            <p className="mt-2 text-sm text-[var(--gray-text)]">
+              New accounts require administrator approval before you can sign in.
+            </p>
+          ) : null}
 
           <label className="mt-6 block text-sm font-semibold text-[var(--navy-dark)]">
             Username
@@ -204,19 +246,50 @@ export default function Home() {
               className="mt-2 w-full rounded-xl border border-[var(--stroke)] px-4 py-3 outline-none ring-[var(--primary-blue)]/30 focus:ring"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              autoComplete="current-password"
+              autoComplete={isRegister ? "new-password" : "current-password"}
             />
           </label>
 
           {error ? <p className="mt-4 text-sm text-red-600">{error}</p> : null}
+          {registerSuccess ? (
+            <p className="mt-4 text-sm text-green-700">{registerSuccess}</p>
+          ) : null}
 
           <button
             className="mt-6 w-full rounded-xl bg-[var(--secondary-purple)] px-4 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
             type="submit"
             disabled={isSubmitting}
           >
-            {isSubmitting ? "Signing in..." : "Sign in"}
+            {isSubmitting
+              ? isRegister ? "Creating account..." : "Signing in..."
+              : isRegister ? "Create account" : "Sign in"}
           </button>
+
+          <p className="mt-4 text-center text-sm text-[var(--gray-text)]">
+            {isRegister ? (
+              <>
+                Already have an account?{" "}
+                <button
+                  type="button"
+                  className="font-semibold text-[var(--primary-blue)] underline"
+                  onClick={() => { setAuthMode("login"); setError(null); setRegisterSuccess(null); }}
+                >
+                  Sign in
+                </button>
+              </>
+            ) : (
+              <>
+                No account?{" "}
+                <button
+                  type="button"
+                  className="font-semibold text-[var(--primary-blue)] underline"
+                  onClick={() => { setAuthMode("register"); setError(null); setRegisterSuccess(null); }}
+                >
+                  Create one
+                </button>
+              </>
+            )}
+          </p>
         </form>
       </main>
     );

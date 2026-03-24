@@ -38,7 +38,7 @@ describe("Home page auth flow", () => {
     render(<Home />);
 
     expect(await screen.findByRole("heading", { name: "Sign in" })).toBeInTheDocument();
-    expect(screen.getByText("Use user/password to continue.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
   });
 
   it("shows generic sign-in state when session check fails", async () => {
@@ -59,7 +59,7 @@ describe("Home page auth flow", () => {
     await screen.findByRole("heading", { name: "Sign in" });
     await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
-    expect(await screen.findByText("Invalid credentials. Use user/password.")).toBeInTheDocument();
+    expect(await screen.findByText("bad")).toBeInTheDocument();
   });
 
   it("signs in and shows the board", async () => {
@@ -293,6 +293,78 @@ describe("Home page auth flow", () => {
     await userEvent.click(screen.getByLabelText("Delete board Board B"));
 
     expect(await screen.findByText("Cannot delete last board")).toBeInTheDocument();
+  });
+
+  it("toggles to create account form and back", async () => {
+    vi.mocked(global.fetch).mockResolvedValueOnce(
+      jsonResponse({ ok: true, payload: { authenticated: false } })
+    );
+
+    render(<Home />);
+    await screen.findByRole("heading", { name: "Sign in" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Create one" }));
+    expect(screen.getByRole("heading", { name: "Create account" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument();
+  });
+
+  it("registers a new account and shows success message", async () => {
+    vi.mocked(global.fetch)
+      .mockResolvedValueOnce(jsonResponse({ ok: true, payload: { authenticated: false } }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          ok: true,
+          payload: {
+            id: "2",
+            username: "newuser",
+            role: "user",
+            suspended: true,
+            message: "Account created. Please wait for an administrator to activate your account.",
+          },
+        })
+      );
+
+    render(<Home />);
+    await screen.findByRole("heading", { name: "Sign in" });
+
+    await userEvent.click(screen.getByRole("button", { name: "Create one" }));
+    // Wait for the create account form to appear
+    await screen.findByRole("heading", { name: "Create account" });
+
+    await userEvent.type(screen.getByLabelText("Username"), "newuser");
+    await userEvent.type(screen.getByLabelText("Password"), "pass123");
+    await userEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(await screen.findByText(/account created/i)).toBeInTheDocument();
+  });
+
+  it("shows error on registration failure", async () => {
+    vi.mocked(global.fetch)
+      .mockResolvedValueOnce(jsonResponse({ ok: true, payload: { authenticated: false } }))
+      .mockResolvedValueOnce(
+        jsonResponse({ ok: false, status: 400, payload: { detail: "Username already exists" } })
+      );
+
+    render(<Home />);
+    await screen.findByRole("heading", { name: "Sign in" });
+    await userEvent.click(screen.getByRole("button", { name: "Create one" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create account" }));
+
+    expect(await screen.findByText("Username already exists")).toBeInTheDocument();
+  });
+
+  it("shows suspended error when suspended user tries to log in", async () => {
+    vi.mocked(global.fetch)
+      .mockResolvedValueOnce(jsonResponse({ ok: true, payload: { authenticated: false } }))
+      .mockResolvedValueOnce(jsonResponse({ ok: false, status: 403, payload: { detail: "Account suspended" } }));
+
+    render(<Home />);
+    await screen.findByRole("heading", { name: "Sign in" });
+    await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByText("Your account is pending activation by an administrator.")).toBeInTheDocument();
   });
 
   it("shows error on board deletion network failure", async () => {

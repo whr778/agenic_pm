@@ -28,11 +28,17 @@ class RenameColumnUpdate(BaseModel):
         return self
 
 
+_VALID_PRIORITIES = {"low", "medium", "high", "critical"}
+
+
 class CreateCardUpdate(BaseModel):
     type: Literal["create_card"]
     columnId: str
     title: str
     details: str = ""
+    due_date: str | None = None
+    priority: str | None = None
+    labels: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_fields(self) -> "CreateCardUpdate":
@@ -40,6 +46,8 @@ class CreateCardUpdate(BaseModel):
             raise ValueError("columnId must be a numeric string")
         if not self.title.strip():
             raise ValueError("title must not be empty")
+        if self.priority is not None and self.priority not in _VALID_PRIORITIES:
+            raise ValueError("priority must be one of: low, medium, high, critical")
         return self
 
 
@@ -48,6 +56,9 @@ class UpdateCardUpdate(BaseModel):
     cardId: str
     title: str
     details: str = ""
+    due_date: str | None = None
+    priority: str | None = None
+    labels: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_fields(self) -> "UpdateCardUpdate":
@@ -55,6 +66,8 @@ class UpdateCardUpdate(BaseModel):
             raise ValueError("cardId must be a numeric string")
         if not self.title.strip():
             raise ValueError("title must not be empty")
+        if self.priority is not None and self.priority not in _VALID_PRIORITIES:
+            raise ValueError("priority must be one of: low, medium, high, critical")
         return self
 
 

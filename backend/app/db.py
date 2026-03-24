@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -138,6 +139,20 @@ def _migrate_boards_unique_constraint(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
+    """Add due_date, priority, and labels columns to existing cards table."""
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(cards)").fetchall()
+    }
+    if "due_date" not in columns:
+        connection.execute("ALTER TABLE cards ADD COLUMN due_date TEXT")
+    if "priority" not in columns:
+        connection.execute("ALTER TABLE cards ADD COLUMN priority TEXT")
+    if "labels" not in columns:
+        connection.execute("ALTER TABLE cards ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'")
+
+
 def init_db() -> None:
     with get_connection() as connection:
         connection.executescript(
@@ -220,6 +235,7 @@ def init_db() -> None:
         _migrate_users_add_columns(connection)
         _migrate_boards_unique_constraint(connection)
         _migrate_sessions_to_user_id(connection)
+        _migrate_cards_add_columns(connection)
 
         default_hash = hash_password("password")
         connection.execute(
@@ -435,6 +451,31 @@ def delete_user(user_id: int) -> None:
         connection.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
 
+def register_user(username: str, password: str) -> dict[str, object]:
+    """Create a new user account that starts suspended until an admin activates it."""
+    normalized = _normalize_non_empty(username, "Username")
+    _normalize_non_empty(password, "Password")
+    hashed = hash_password(password)
+    with get_connection() as connection:
+        existing = connection.execute(
+            "SELECT id FROM users WHERE username = ?", (normalized,)
+        ).fetchone()
+        if existing is not None:
+            raise ValidationError("Username already exists")
+        cursor = connection.execute(
+            "INSERT INTO users (username, role, password_hash, suspended) VALUES (?, 'user', ?, 1)",
+            (normalized, hashed),
+        )
+        user_id = int(cursor.lastrowid)
+    return {
+        "id": str(user_id),
+        "username": normalized,
+        "role": "user",
+        "suspended": True,
+        "message": "Account created. Please wait for an administrator to activate your account.",
+    }
+
+
 def _get_board(connection: sqlite3.Connection, user_id: int, board_id: int) -> sqlite3.Row:
     board = connection.execute(
         "SELECT id, name FROM boards WHERE id = ? AND user_id = ?",
@@ -513,7 +554,7 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
 
         card_rows = connection.execute(
             """
-            SELECT id, column_id, title, details, position
+            SELECT id, column_id, title, details, position, due_date, priority, labels
             FROM cards
             WHERE board_id = ?
             ORDER BY column_id ASC, position ASC
@@ -524,16 +565,24 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
         card_ids_by_column: dict[int, list[str]] = {
             int(row["id"]): [] for row in column_rows
         }
-        cards_map: dict[str, dict[str, str]] = {}
+        cards_map: dict[str, dict[str, object]] = {}
 
         for card in card_rows:
             card_id = str(card["id"])
             column_id = int(card["column_id"])
             card_ids_by_column.setdefault(column_id, []).append(card_id)
+            raw_labels = card["labels"]
+            try:
+                labels = json.loads(raw_labels) if raw_labels else []
+            except (json.JSONDecodeError, TypeError):
+                labels = []
             cards_map[card_id] = {
                 "id": card_id,
                 "title": str(card["title"]),
                 "details": str(card["details"]),
+                "due_date": card["due_date"],
+                "priority": card["priority"],
+                "labels": labels,
             }
 
         columns_payload = [
@@ -568,18 +617,59 @@ def rename_column(user_id: int, board_id: int, column_id: int, title: str) -> di
     return {"id": str(column_id), "title": normalized}
 
 
-def create_card(user_id: int, board_id: int, column_id: int, title: str, details: str) -> dict[str, str]:
+def create_card(
+    user_id: int,
+    board_id: int,
+    column_id: int,
+    title: str,
+    details: str,
+    *,
+    due_date: str | None = None,
+    priority: str | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, object]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
-        card_id, norm_title, norm_details = _create_card_conn(connection, board_id, column_id, title, details)
-    return {"id": str(card_id), "columnId": str(column_id), "title": norm_title, "details": norm_details}
+        card_id, norm_title, norm_details = _create_card_conn(
+            connection, board_id, column_id, title, details,
+            due_date=due_date, priority=priority, labels=labels,
+        )
+    return {
+        "id": str(card_id),
+        "columnId": str(column_id),
+        "title": norm_title,
+        "details": norm_details,
+        "due_date": due_date,
+        "priority": priority,
+        "labels": labels or [],
+    }
 
 
-def update_card(user_id: int, board_id: int, card_id: int, title: str, details: str) -> dict[str, str]:
+def update_card(
+    user_id: int,
+    board_id: int,
+    card_id: int,
+    title: str,
+    details: str,
+    *,
+    due_date: str | None = None,
+    priority: str | None = None,
+    labels: list[str] | None = None,
+) -> dict[str, object]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
-        norm_title, norm_details = _update_card_conn(connection, board_id, card_id, title, details)
-    return {"id": str(card_id), "title": norm_title, "details": norm_details}
+        norm_title, norm_details = _update_card_conn(
+            connection, board_id, card_id, title, details,
+            due_date=due_date, priority=priority, labels=labels,
+        )
+    return {
+        "id": str(card_id),
+        "title": norm_title,
+        "details": norm_details,
+        "due_date": due_date,
+        "priority": priority,
+        "labels": labels or [],
+    }
 
 
 def delete_card(user_id: int, board_id: int, card_id: int) -> None:
@@ -688,11 +778,26 @@ def _rename_column_conn(connection: sqlite3.Connection, board_id: int, column_id
     return normalized
 
 
+def _validate_priority(priority: str | None) -> str | None:
+    if priority is not None and priority not in ("low", "medium", "high", "critical"):
+        raise ValidationError("priority must be one of: low, medium, high, critical")
+    return priority
+
+
 def _create_card_conn(
-    connection: sqlite3.Connection, board_id: int, column_id: int, title: str, details: str
+    connection: sqlite3.Connection,
+    board_id: int,
+    column_id: int,
+    title: str,
+    details: str,
+    *,
+    due_date: str | None = None,
+    priority: str | None = None,
+    labels: list[str] | None = None,
 ) -> tuple[int, str, str]:
     normalized_title = _normalize_non_empty(title, "Card title")
     normalized_details = details.strip()
+    _validate_priority(priority)
     row = connection.execute(
         "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
         (column_id, board_id),
@@ -705,27 +810,45 @@ def _create_card_conn(
     ).fetchone()
     assert position_row is not None
     position = int(position_row["next_pos"])
+    labels_json = json.dumps(labels or [])
     cursor = connection.execute(
-        "INSERT INTO cards (board_id, column_id, title, details, position) VALUES (?, ?, ?, ?, ?)",
-        (board_id, column_id, normalized_title, normalized_details, position),
+        """
+        INSERT INTO cards (board_id, column_id, title, details, position, due_date, priority, labels)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (board_id, column_id, normalized_title, normalized_details, position, due_date, priority, labels_json),
     )
     return int(cursor.lastrowid), normalized_title, normalized_details
 
 
 def _update_card_conn(
-    connection: sqlite3.Connection, board_id: int, card_id: int, title: str, details: str
+    connection: sqlite3.Connection,
+    board_id: int,
+    card_id: int,
+    title: str,
+    details: str,
+    *,
+    due_date: str | None = None,
+    priority: str | None = None,
+    labels: list[str] | None = None,
 ) -> tuple[str, str]:
     normalized_title = _normalize_non_empty(title, "Card title")
     normalized_details = details.strip()
+    _validate_priority(priority)
     card = connection.execute(
         "SELECT id FROM cards WHERE id = ? AND board_id = ?",
         (card_id, board_id),
     ).fetchone()
     if card is None:
         raise NotFoundError("Card not found")
+    labels_json = json.dumps(labels or [])
     connection.execute(
-        "UPDATE cards SET title = ?, details = ?, updated_at = datetime('now') WHERE id = ?",
-        (normalized_title, normalized_details, card_id),
+        """
+        UPDATE cards
+        SET title = ?, details = ?, due_date = ?, priority = ?, labels = ?, updated_at = datetime('now')
+        WHERE id = ?
+        """,
+        (normalized_title, normalized_details, due_date, priority, labels_json, card_id),
     )
     return normalized_title, normalized_details
 
@@ -823,18 +946,26 @@ def apply_updates_atomically(user_id: int, board_id: int, updates: list[dict[str
                         str(update.get("title", "")),
                     )
                 elif update_type == "create_card":
+                    raw_labels = update.get("labels")
                     _create_card_conn(
                         connection, board_id,
                         int(str(update.get("columnId", ""))),
                         str(update.get("title", "")),
                         str(update.get("details", "")),
+                        due_date=update.get("due_date") or None,  # type: ignore[arg-type]
+                        priority=update.get("priority") or None,  # type: ignore[arg-type]
+                        labels=raw_labels if isinstance(raw_labels, list) else [],
                     )
                 elif update_type == "update_card":
+                    raw_labels = update.get("labels")
                     _update_card_conn(
                         connection, board_id,
                         int(str(update.get("cardId", ""))),
                         str(update.get("title", "")),
                         str(update.get("details", "")),
+                        due_date=update.get("due_date") or None,  # type: ignore[arg-type]
+                        priority=update.get("priority") or None,  # type: ignore[arg-type]
+                        labels=raw_labels if isinstance(raw_labels, list) else [],
                     )
                 elif update_type == "delete_card":
                     _delete_card_conn(
@@ -846,7 +977,7 @@ def apply_updates_atomically(user_id: int, board_id: int, updates: list[dict[str
                         connection, board_id,
                         int(str(update.get("cardId", ""))),
                         int(str(update.get("toColumnId", ""))),
-                        int(update.get("toIndex", 0)),
+                        int(str(update.get("toIndex", 0))),
                     )
                 else:
                     raise ValidationError(f"Unsupported update type: {update_type}")

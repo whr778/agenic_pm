@@ -2,7 +2,7 @@ import clsx from "clsx";
 import { useEffect, useState } from "react";
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import type { Card, Column } from "@/lib/kanban";
+import type { Card, Column, Priority } from "@/lib/kanban";
 import { KanbanCard, type MoveDirection } from "@/components/KanbanCard";
 import { NewCardForm } from "@/components/NewCardForm";
 
@@ -14,7 +14,7 @@ type KanbanColumnProps = {
   onRename: (columnId: string, title: string) => void;
   onAddCard: (columnId: string, title: string, details: string) => void;
   onDeleteCard: (columnId: string, cardId: string) => void;
-  onEditCard: (cardId: string, title: string, details: string) => void;
+  onEditCard: (cardId: string, title: string, details: string, due_date: string | null, priority: Priority | null, labels: string[]) => void;
   onMoveCard?: (cardId: string, direction: MoveDirection) => void;
 };
 
