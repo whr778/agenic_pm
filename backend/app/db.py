@@ -140,7 +140,7 @@ def _migrate_boards_unique_constraint(connection: sqlite3.Connection) -> None:
 
 
 def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
-    """Add due_date, priority, and labels columns to existing cards table."""
+    """Add due_date, priority, labels, and assignee_id columns to existing cards table."""
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(cards)").fetchall()
@@ -151,6 +151,8 @@ def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE cards ADD COLUMN priority TEXT")
     if "labels" not in columns:
         connection.execute("ALTER TABLE cards ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'")
+    if "assignee_id" not in columns:
+        connection.execute("ALTER TABLE cards ADD COLUMN assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
 
 
 def init_db() -> None:
@@ -196,6 +198,10 @@ def init_db() -> None:
               title TEXT NOT NULL,
               details TEXT NOT NULL DEFAULT '',
               position INTEGER NOT NULL,
+              due_date TEXT,
+              priority TEXT,
+              labels TEXT NOT NULL DEFAULT '[]',
+              assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
               updated_at TEXT NOT NULL DEFAULT (datetime('now')),
               FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE,
@@ -229,6 +235,21 @@ def init_db() -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+
+            CREATE TABLE IF NOT EXISTS card_comments (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              card_id INTEGER NOT NULL,
+              board_id INTEGER NOT NULL,
+              user_id INTEGER NOT NULL,
+              content TEXT NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY (card_id) REFERENCES cards(id) ON DELETE CASCADE,
+              FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE,
+              FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_card_comments_card_id ON card_comments(card_id);
             """
         )
 
@@ -236,6 +257,11 @@ def init_db() -> None:
         _migrate_boards_unique_constraint(connection)
         _migrate_sessions_to_user_id(connection)
         _migrate_cards_add_columns(connection)
+
+        # Index on assignee_id must come after migration (column added by migration on old DBs)
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cards_assignee_id ON cards(assignee_id)"
+        )
 
         default_hash = hash_password("password")
         connection.execute(
@@ -355,7 +381,7 @@ def create_user(username: str, password: str, role: str) -> dict[str, object]:
             "INSERT INTO users (username, role, password_hash) VALUES (?, ?, ?)",
             (normalized, role, hashed),
         )
-        user_id = int(cursor.lastrowid)
+        user_id = int(cursor.lastrowid or 0)
     return {
         "id": str(user_id),
         "username": normalized,
@@ -466,7 +492,7 @@ def register_user(username: str, password: str) -> dict[str, object]:
             "INSERT INTO users (username, role, password_hash, suspended) VALUES (?, 'user', ?, 1)",
             (normalized, hashed),
         )
-        user_id = int(cursor.lastrowid)
+        user_id = int(cursor.lastrowid or 0)
     return {
         "id": str(user_id),
         "username": normalized,
@@ -513,7 +539,7 @@ def create_board(user_id: int, name: str) -> dict[str, object]:
             "INSERT INTO boards (user_id, name) VALUES (?, ?)",
             (user_id, normalized),
         )
-        board_id = int(cursor.lastrowid)
+        board_id = int(cursor.lastrowid or 0)
 
         for index, (key, title) in enumerate(FIXED_COLUMNS):
             connection.execute(
@@ -554,10 +580,13 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
 
         card_rows = connection.execute(
             """
-            SELECT id, column_id, title, details, position, due_date, priority, labels
-            FROM cards
-            WHERE board_id = ?
-            ORDER BY column_id ASC, position ASC
+            SELECT c.id, c.column_id, c.title, c.details, c.position,
+                   c.due_date, c.priority, c.labels, c.assignee_id,
+                   u.username AS assignee_username
+            FROM cards c
+            LEFT JOIN users u ON c.assignee_id = u.id
+            WHERE c.board_id = ?
+            ORDER BY c.column_id ASC, c.position ASC
             """,
             (board_id,),
         ).fetchall()
@@ -583,6 +612,8 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
                 "due_date": card["due_date"],
                 "priority": card["priority"],
                 "labels": labels,
+                "assignee_id": str(card["assignee_id"]) if card["assignee_id"] else None,
+                "assignee_username": card["assignee_username"],
             }
 
         columns_payload = [
@@ -627,12 +658,13 @@ def create_card(
     due_date: str | None = None,
     priority: str | None = None,
     labels: list[str] | None = None,
+    assignee_id: int | None = None,
 ) -> dict[str, object]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
         card_id, norm_title, norm_details = _create_card_conn(
             connection, board_id, column_id, title, details,
-            due_date=due_date, priority=priority, labels=labels,
+            due_date=due_date, priority=priority, labels=labels, assignee_id=assignee_id,
         )
     return {
         "id": str(card_id),
@@ -642,6 +674,7 @@ def create_card(
         "due_date": due_date,
         "priority": priority,
         "labels": labels or [],
+        "assignee_id": str(assignee_id) if assignee_id else None,
     }
 
 
@@ -655,12 +688,13 @@ def update_card(
     due_date: str | None = None,
     priority: str | None = None,
     labels: list[str] | None = None,
+    assignee_id: int | None = None,
 ) -> dict[str, object]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
         norm_title, norm_details = _update_card_conn(
             connection, board_id, card_id, title, details,
-            due_date=due_date, priority=priority, labels=labels,
+            due_date=due_date, priority=priority, labels=labels, assignee_id=assignee_id,
         )
     return {
         "id": str(card_id),
@@ -669,6 +703,7 @@ def update_card(
         "due_date": due_date,
         "priority": priority,
         "labels": labels or [],
+        "assignee_id": str(assignee_id) if assignee_id else None,
     }
 
 
@@ -794,6 +829,7 @@ def _create_card_conn(
     due_date: str | None = None,
     priority: str | None = None,
     labels: list[str] | None = None,
+    assignee_id: int | None = None,
 ) -> tuple[int, str, str]:
     normalized_title = _normalize_non_empty(title, "Card title")
     normalized_details = details.strip()
@@ -813,12 +849,12 @@ def _create_card_conn(
     labels_json = json.dumps(labels or [])
     cursor = connection.execute(
         """
-        INSERT INTO cards (board_id, column_id, title, details, position, due_date, priority, labels)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO cards (board_id, column_id, title, details, position, due_date, priority, labels, assignee_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (board_id, column_id, normalized_title, normalized_details, position, due_date, priority, labels_json),
+        (board_id, column_id, normalized_title, normalized_details, position, due_date, priority, labels_json, assignee_id),
     )
-    return int(cursor.lastrowid), normalized_title, normalized_details
+    return int(cursor.lastrowid or 0), normalized_title, normalized_details
 
 
 def _update_card_conn(
@@ -831,6 +867,7 @@ def _update_card_conn(
     due_date: str | None = None,
     priority: str | None = None,
     labels: list[str] | None = None,
+    assignee_id: int | None = None,
 ) -> tuple[str, str]:
     normalized_title = _normalize_non_empty(title, "Card title")
     normalized_details = details.strip()
@@ -845,10 +882,11 @@ def _update_card_conn(
     connection.execute(
         """
         UPDATE cards
-        SET title = ?, details = ?, due_date = ?, priority = ?, labels = ?, updated_at = datetime('now')
+        SET title = ?, details = ?, due_date = ?, priority = ?, labels = ?,
+            assignee_id = ?, updated_at = datetime('now')
         WHERE id = ?
         """,
-        (normalized_title, normalized_details, due_date, priority, labels_json, card_id),
+        (normalized_title, normalized_details, due_date, priority, labels_json, assignee_id, card_id),
     )
     return normalized_title, normalized_details
 
@@ -947,6 +985,7 @@ def apply_updates_atomically(user_id: int, board_id: int, updates: list[dict[str
                     )
                 elif update_type == "create_card":
                     raw_labels = update.get("labels")
+                    raw_assignee = update.get("assignee_id")
                     _create_card_conn(
                         connection, board_id,
                         int(str(update.get("columnId", ""))),
@@ -955,9 +994,11 @@ def apply_updates_atomically(user_id: int, board_id: int, updates: list[dict[str
                         due_date=update.get("due_date") or None,  # type: ignore[arg-type]
                         priority=update.get("priority") or None,  # type: ignore[arg-type]
                         labels=raw_labels if isinstance(raw_labels, list) else [],
+                        assignee_id=int(str(raw_assignee)) if raw_assignee else None,
                     )
                 elif update_type == "update_card":
                     raw_labels = update.get("labels")
+                    raw_assignee = update.get("assignee_id")
                     _update_card_conn(
                         connection, board_id,
                         int(str(update.get("cardId", ""))),
@@ -966,6 +1007,7 @@ def apply_updates_atomically(user_id: int, board_id: int, updates: list[dict[str
                         due_date=update.get("due_date") or None,  # type: ignore[arg-type]
                         priority=update.get("priority") or None,  # type: ignore[arg-type]
                         labels=raw_labels if isinstance(raw_labels, list) else [],
+                        assignee_id=int(str(raw_assignee)) if raw_assignee else None,
                     )
                 elif update_type == "delete_card":
                     _delete_card_conn(
@@ -981,6 +1023,122 @@ def apply_updates_atomically(user_id: int, board_id: int, updates: list[dict[str
                     )
                 else:
                     raise ValidationError(f"Unsupported update type: {update_type}")
+
+
+def list_assignable_users() -> list[dict[str, str]]:
+    """Return non-suspended users available for card assignment."""
+    with get_connection() as connection:
+        rows = connection.execute(
+            "SELECT id, username FROM users WHERE suspended = 0 ORDER BY username ASC"
+        ).fetchall()
+    return [{"id": str(row["id"]), "username": str(row["username"])} for row in rows]
+
+
+def get_board_stats(user_id: int, board_id: int) -> dict[str, object]:
+    """Return aggregate statistics for a board."""
+    today = __import__("datetime").date.today().isoformat()
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+
+        col_rows = connection.execute(
+            """
+            SELECT bc.id, bc.title,
+                   COUNT(c.id) AS card_count
+            FROM board_columns bc
+            LEFT JOIN cards c ON c.column_id = bc.id AND c.board_id = ?
+            WHERE bc.board_id = ?
+            GROUP BY bc.id, bc.title
+            ORDER BY bc.position ASC
+            """,
+            (board_id, board_id),
+        ).fetchall()
+
+        overdue_row = connection.execute(
+            "SELECT COUNT(*) AS cnt FROM cards WHERE board_id = ? AND due_date IS NOT NULL AND due_date < ?",
+            (board_id, today),
+        ).fetchone()
+
+        priority_rows = connection.execute(
+            """
+            SELECT COALESCE(priority, 'none') AS priority, COUNT(*) AS cnt
+            FROM cards WHERE board_id = ?
+            GROUP BY priority
+            """,
+            (board_id,),
+        ).fetchall()
+
+        total_row = connection.execute(
+            "SELECT COUNT(*) AS cnt FROM cards WHERE board_id = ?",
+            (board_id,),
+        ).fetchone()
+
+    cards_per_column = [
+        {"id": str(row["id"]), "title": str(row["title"]), "count": int(row["card_count"])}
+        for row in col_rows
+    ]
+    by_priority = {str(row["priority"]): int(row["cnt"]) for row in priority_rows}
+    return {
+        "total_cards": int(total_row["cnt"]) if total_row else 0,
+        "overdue_count": int(overdue_row["cnt"]) if overdue_row else 0,
+        "cards_per_column": cards_per_column,
+        "cards_by_priority": by_priority,
+    }
+
+
+def list_card_comments(user_id: int, board_id: int, card_id: int) -> list[dict[str, object]]:
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        card = connection.execute(
+            "SELECT id FROM cards WHERE id = ? AND board_id = ?",
+            (card_id, board_id),
+        ).fetchone()
+        if card is None:
+            raise NotFoundError("Card not found")
+        rows = connection.execute(
+            """
+            SELECT cc.id, cc.content, cc.created_at, u.username AS author
+            FROM card_comments cc
+            JOIN users u ON cc.user_id = u.id
+            WHERE cc.card_id = ? AND cc.board_id = ?
+            ORDER BY cc.created_at ASC
+            """,
+            (card_id, board_id),
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "content": str(row["content"]),
+            "author": str(row["author"]),
+            "createdAt": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def add_card_comment(user_id: int, board_id: int, card_id: int, content: str) -> dict[str, object]:
+    normalized = _normalize_non_empty(content, "Comment content")
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        card = connection.execute(
+            "SELECT id FROM cards WHERE id = ? AND board_id = ?",
+            (card_id, board_id),
+        ).fetchone()
+        if card is None:
+            raise NotFoundError("Card not found")
+        cursor = connection.execute(
+            "INSERT INTO card_comments (card_id, board_id, user_id, content) VALUES (?, ?, ?, ?)",
+            (card_id, board_id, user_id, normalized),
+        )
+        comment_id = int(cursor.lastrowid or 0)
+        author_row = connection.execute(
+            "SELECT username FROM users WHERE id = ?", (user_id,)
+        ).fetchone()
+    return {
+        "id": str(comment_id),
+        "content": normalized,
+        "author": str(author_row["username"]) if author_row else "",
+        "createdAt": __import__("datetime").datetime.utcnow().isoformat(),
+    }
 
 
 SESSION_LIFETIME_SECONDS = 24 * 60 * 60  # 24 hours

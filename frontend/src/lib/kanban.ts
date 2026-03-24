@@ -7,6 +7,27 @@ export type Card = {
   due_date?: string | null;
   priority?: Priority | null;
   labels?: string[];
+  assignee_id?: string | null;
+  assignee_username?: string | null;
+};
+
+export type AssignableUser = {
+  id: string;
+  username: string;
+};
+
+export type BoardStats = {
+  total_cards: number;
+  overdue_count: number;
+  cards_per_column: { id: string; title: string; count: number }[];
+  cards_by_priority: Record<string, number>;
+};
+
+export type Comment = {
+  id: string;
+  content: string;
+  author: string;
+  createdAt: string;
 };
 
 export type Column = {

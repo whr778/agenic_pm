@@ -2,25 +2,29 @@ import clsx from "clsx";
 import { useEffect, useState } from "react";
 import { useDroppable } from "@dnd-kit/core";
 import { SortableContext, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import type { Card, Column, Priority } from "@/lib/kanban";
+import type { AssignableUser, Card, Column, Priority } from "@/lib/kanban";
 import { KanbanCard, type MoveDirection } from "@/components/KanbanCard";
 import { NewCardForm } from "@/components/NewCardForm";
 
 type KanbanColumnProps = {
   column: Column;
   cards: Card[];
+  boardId: string;
+  assignableUsers: AssignableUser[];
   isFirstColumn?: boolean;
   isLastColumn?: boolean;
   onRename: (columnId: string, title: string) => void;
   onAddCard: (columnId: string, title: string, details: string) => void;
   onDeleteCard: (columnId: string, cardId: string) => void;
-  onEditCard: (cardId: string, title: string, details: string, due_date: string | null, priority: Priority | null, labels: string[]) => void;
+  onEditCard: (cardId: string, title: string, details: string, due_date: string | null, priority: Priority | null, labels: string[], assignee_id: string | null) => void;
   onMoveCard?: (cardId: string, direction: MoveDirection) => void;
 };
 
 export const KanbanColumn = ({
   column,
   cards,
+  boardId,
+  assignableUsers,
   isFirstColumn = false,
   isLastColumn = false,
   onRename,
@@ -100,6 +104,8 @@ export const KanbanColumn = ({
             <KanbanCard
               key={card.id}
               card={card}
+              boardId={boardId}
+              assignableUsers={assignableUsers}
               onDelete={(cardId) => onDeleteCard(column.id, cardId)}
               onEdit={onEditCard}
               onMove={onMoveCard}

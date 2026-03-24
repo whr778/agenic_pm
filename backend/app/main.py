@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import db, openrouter  # noqa: F401 — openrouter re-exported for test patching
-from app.routers import auth, registration, boards, columns, cards, ai, admin
+from app.routers import auth, registration, boards, columns, cards, ai, admin, users, stats, comments
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
@@ -33,6 +33,9 @@ app.include_router(columns.router)
 app.include_router(cards.router)
 app.include_router(ai.router)
 app.include_router(admin.router)
+app.include_router(users.router)
+app.include_router(stats.router)
+app.include_router(comments.router)
 
 
 @app.get("/health")

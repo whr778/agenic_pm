@@ -26,6 +26,7 @@ class CreateCardPayload(BaseModel):
     due_date: str | None = Field(default=None, max_length=10)  # YYYY-MM-DD
     priority: PRIORITY_VALUES | None = None
     labels: list[str] = Field(default_factory=list)
+    assignee_id: str | None = Field(default=None, max_length=20)
 
 
 class UpdateCardPayload(BaseModel):
@@ -34,6 +35,7 @@ class UpdateCardPayload(BaseModel):
     due_date: str | None = Field(default=None, max_length=10)  # YYYY-MM-DD or None to clear
     priority: PRIORITY_VALUES | None = None
     labels: list[str] = Field(default_factory=list)
+    assignee_id: str | None = Field(default=None, max_length=20)
 
 
 class MoveCardPayload(BaseModel):
@@ -70,3 +72,7 @@ class UpdateUserPayload(BaseModel):
 class RegisterPayload(BaseModel):
     username: str = Field(max_length=100)
     password: str = Field(max_length=256)
+
+
+class AddCommentPayload(BaseModel):
+    content: str = Field(max_length=4000)

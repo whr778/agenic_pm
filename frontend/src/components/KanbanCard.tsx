@@ -1,15 +1,25 @@
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import clsx from "clsx";
-import { useEffect, useState } from "react";
-import type { Card, Priority } from "@/lib/kanban";
+import { useEffect, useRef, useState } from "react";
+import type { AssignableUser, Card, Comment, Priority } from "@/lib/kanban";
 
 export type MoveDirection = "up" | "down" | "left" | "right";
 
 type KanbanCardProps = {
   card: Card;
+  boardId: string;
+  assignableUsers: AssignableUser[];
   onDelete: (cardId: string) => void;
-  onEdit: (cardId: string, title: string, details: string, due_date: string | null, priority: Priority | null, labels: string[]) => void;
+  onEdit: (
+    cardId: string,
+    title: string,
+    details: string,
+    due_date: string | null,
+    priority: Priority | null,
+    labels: string[],
+    assignee_id: string | null,
+  ) => void;
   onMove?: (cardId: string, direction: MoveDirection) => void;
   canMove?: { up: boolean; down: boolean; left: boolean; right: boolean };
 };
@@ -26,7 +36,23 @@ function isOverdue(due_date: string): boolean {
   return due_date < today;
 }
 
-export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCardProps) => {
+function initials(username: string): string {
+  return username
+    .split(/[\s_-]+/)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase() ?? "")
+    .join("");
+}
+
+export const KanbanCard = ({
+  card,
+  boardId,
+  assignableUsers,
+  onDelete,
+  onEdit,
+  onMove,
+  canMove,
+}: KanbanCardProps) => {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: card.id });
   const [isEditing, setIsEditing] = useState(false);
@@ -35,18 +61,47 @@ export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCa
   const [draftDueDate, setDraftDueDate] = useState(card.due_date ?? "");
   const [draftPriority, setDraftPriority] = useState<Priority | "">(card.priority ?? "");
   const [draftLabels, setDraftLabels] = useState((card.labels ?? []).join(", "));
+  const [draftAssigneeId, setDraftAssigneeId] = useState(card.assignee_id ?? "");
   const [titleError, setTitleError] = useState(false);
+
+  // Comments state
+  const [showComments, setShowComments] = useState(false);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [commentsLoaded, setCommentsLoaded] = useState(false);
+  const [commentInput, setCommentInput] = useState("");
+  const [commentSubmitting, setCommentSubmitting] = useState(false);
+  const [commentError, setCommentError] = useState<string | null>(null);
+  const commentsEndRef = useRef<HTMLDivElement>(null);
 
   // Keep local edit drafts in sync when the server refreshes this card.
   useEffect(() => {
-    /* eslint-disable react-hooks/set-state-in-effect */
     setDraftTitle(card.title);
     setDraftDetails(card.details);
     setDraftDueDate(card.due_date ?? "");
     setDraftPriority(card.priority ?? "");
     setDraftLabels((card.labels ?? []).join(", "));
-    /* eslint-enable react-hooks/set-state-in-effect */
-  }, [card.title, card.details, card.due_date, card.priority, card.labels]);
+    setDraftAssigneeId(card.assignee_id ?? "");
+  }, [card.title, card.details, card.due_date, card.priority, card.labels, card.assignee_id]);
+
+  useEffect(() => {
+    if (showComments && !commentsLoaded) {
+      void fetch(`/api/boards/${boardId}/cards/${card.id}/comments`, { credentials: "include" })
+        .then((r) => r.json())
+        .then((data: Comment[]) => {
+          setComments(data);
+          setCommentsLoaded(true);
+        })
+        .catch(() => {
+          setCommentsLoaded(true);
+        });
+    }
+  }, [showComments, commentsLoaded, boardId, card.id]);
+
+  useEffect(() => {
+    if (showComments) {
+      commentsEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
+    }
+  }, [comments, showComments]);
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -68,8 +123,9 @@ export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCa
       .split(",")
       .map((l) => l.trim())
       .filter(Boolean);
+    const assignee_id = draftAssigneeId || null;
 
-    onEdit(card.id, title, details, due_date, priority, labels);
+    onEdit(card.id, title, details, due_date, priority, labels, assignee_id);
     setIsEditing(false);
   };
 
@@ -79,11 +135,42 @@ export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCa
     setDraftDueDate(card.due_date ?? "");
     setDraftPriority(card.priority ?? "");
     setDraftLabels((card.labels ?? []).join(", "));
+    setDraftAssigneeId(card.assignee_id ?? "");
     setTitleError(false);
     setIsEditing(false);
   };
 
+  const handleAddComment = async () => {
+    const content = commentInput.trim();
+    if (!content || commentSubmitting) return;
+    setCommentSubmitting(true);
+    setCommentError(null);
+    try {
+      const response = await fetch(
+        `/api/boards/${boardId}/cards/${card.id}/comments`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content }),
+        },
+      );
+      if (!response.ok) {
+        const payload = (await response.json()) as { detail?: string };
+        throw new Error(payload.detail ?? "Failed to add comment");
+      }
+      const newComment = (await response.json()) as Comment;
+      setComments((prev) => [...prev, newComment]);
+      setCommentInput("");
+    } catch (err) {
+      setCommentError(err instanceof Error ? err.message : "Failed to add comment");
+    } finally {
+      setCommentSubmitting(false);
+    }
+  };
+
   const overdueClass = card.due_date && isOverdue(card.due_date) ? "text-red-600" : "text-[var(--gray-text)]";
+  const assignee = card.assignee_username ?? null;
 
   return (
     <article
@@ -165,6 +252,22 @@ export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCa
                 aria-label="Labels"
               />
             </div>
+            {assignableUsers.length > 0 && (
+              <div>
+                <label className="block text-xs font-semibold text-[var(--gray-text)]">Assignee</label>
+                <select
+                  value={draftAssigneeId}
+                  onChange={(e) => setDraftAssigneeId(e.target.value)}
+                  className="w-full rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs text-[var(--navy-dark)] outline-none"
+                  aria-label="Assignee"
+                >
+                  <option value="">Unassigned</option>
+                  {assignableUsers.map((u) => (
+                    <option key={u.id} value={u.id}>{u.username}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -200,9 +303,20 @@ export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCa
                   ))}
                 </div>
               )}
-              <h4 className="font-display text-base font-semibold text-[var(--navy-dark)]">
-                {card.title}
-              </h4>
+              <div className="flex items-start justify-between gap-2">
+                <h4 className="font-display text-base font-semibold text-[var(--navy-dark)]">
+                  {card.title}
+                </h4>
+                {assignee && (
+                  <span
+                    title={assignee}
+                    className="ml-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--secondary-purple)]/15 text-[10px] font-bold text-[var(--secondary-purple)]"
+                    data-testid={`card-assignee-${card.id}`}
+                  >
+                    {initials(assignee)}
+                  </span>
+                )}
+              </div>
               {card.details && (
                 <p className="mt-2 text-sm leading-6 text-[var(--gray-text)]">
                   {card.details}
@@ -225,6 +339,21 @@ export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCa
               </button>
               <button
                 type="button"
+                onClick={() => {
+                  setShowComments((v) => !v);
+                }}
+                className="rounded-full border border-transparent px-3 py-1 text-xs font-semibold text-[var(--gray-text)] transition hover:border-[var(--stroke)] hover:text-[var(--navy-dark)]"
+                aria-label={`${showComments ? "Hide" : "Show"} comments for ${card.title}`}
+              >
+                {showComments ? "Hide" : "Comments"}
+                {comments.length > 0 && !showComments && (
+                  <span className="ml-1 rounded-full bg-[var(--primary-blue)]/15 px-1.5 text-[10px] font-bold text-[var(--primary-blue)]">
+                    {comments.length}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
                 onClick={() => onDelete(card.id)}
                 className="rounded-full border border-transparent px-3 py-1 text-xs font-semibold text-[var(--gray-text)] transition hover:border-[var(--stroke)] hover:text-[var(--navy-dark)]"
                 aria-label={`Delete ${card.title}`}
@@ -240,6 +369,44 @@ export const KanbanCard = ({ card, onDelete, onEdit, onMove, canMove }: KanbanCa
                 </div>
               )}
             </div>
+
+            {showComments && (
+              <div className="mt-2 space-y-2 border-t border-[var(--stroke)] pt-2" data-testid={`comments-${card.id}`}>
+                {comments.length === 0 ? (
+                  <p className="text-xs text-[var(--gray-text)]">No comments yet.</p>
+                ) : (
+                  comments.map((c) => (
+                    <div key={c.id} className="rounded-lg bg-[var(--surface)] px-3 py-2 text-xs">
+                      <span className="font-semibold text-[var(--navy-dark)]">{c.author}</span>
+                      <span className="ml-2 text-[var(--gray-text)]">{c.content}</span>
+                    </div>
+                  ))
+                )}
+                <div ref={commentsEndRef} />
+                {commentError && (
+                  <p className="text-xs text-red-600" role="alert">{commentError}</p>
+                )}
+                <div className="flex gap-1">
+                  <input
+                    value={commentInput}
+                    onChange={(e) => setCommentInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") void handleAddComment(); }}
+                    placeholder="Add a comment..."
+                    maxLength={4000}
+                    className="flex-1 rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs outline-none"
+                    aria-label="New comment"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleAddComment()}
+                    disabled={commentSubmitting || !commentInput.trim()}
+                    className="rounded-lg bg-[var(--primary-blue)] px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                  >
+                    Post
+                  </button>
+                </div>
+              </div>
+            )}
           </>
         )}
       </div>

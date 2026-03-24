@@ -1121,3 +1121,255 @@ def test_ai_connectivity_real_smoke(client: TestClient) -> None:
     assert payload["status"] == "ok"
     assert isinstance(payload["response"], str)
     assert payload["response"].strip() != ""
+
+
+# --- Card assignment ---
+
+
+def test_list_assignable_users_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/users")
+    assert response.status_code == 401
+
+
+def test_list_assignable_users(client: TestClient) -> None:
+    login(client)
+    response = client.get("/api/users")
+    assert response.status_code == 200
+    users = response.json()
+    assert isinstance(users, list)
+    # seeded admin user is unsuspended
+    assert any(u["username"] == "user" for u in users)
+    assert all("id" in u and "username" in u for u in users)
+
+
+def test_suspended_user_excluded_from_assignable(client: TestClient) -> None:
+    login(client)
+    create = client.post(
+        "/api/admin/users",
+        json={"username": "susp_assign", "password": "pass", "role": "user"},
+    )
+    uid = create.json()["id"]
+    client.put(f"/api/admin/users/{uid}", json={"suspended": True})
+
+    users = client.get("/api/users").json()
+    assert not any(u["username"] == "susp_assign" for u in users)
+
+
+def test_create_card_with_assignee(client: TestClient) -> None:
+    login(client)
+    # create a second user to assign
+    client.post("/api/admin/users", json={"username": "assignee", "password": "pass", "role": "user"})
+    users = client.get("/api/users").json()
+    assignee = next(u for u in users if u["username"] == "assignee")
+
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    response = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Assigned card", "details": "", "assignee_id": assignee["id"]},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["assignee_id"] == assignee["id"]
+
+
+def test_board_payload_includes_assignee_username(client: TestClient) -> None:
+    login(client)
+    client.post("/api/admin/users", json={"username": "assignee2", "password": "pass", "role": "user"})
+    users = client.get("/api/users").json()
+    assignee = next(u for u in users if u["username"] == "assignee2")
+
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Assigned", "details": "", "assignee_id": assignee["id"]},
+    )
+
+    board = client.get(f"/api/board/{board_id}").json()
+    assigned_card = next(c for c in board["cards"].values() if c["title"] == "Assigned")
+    assert assigned_card["assignee_id"] == assignee["id"]
+    assert assigned_card["assignee_username"] == "assignee2"
+
+
+def test_assignee_clears_when_user_deleted(client: TestClient) -> None:
+    login(client)
+    create = client.post(
+        "/api/admin/users",
+        json={"username": "temp_assignee", "password": "pass", "role": "user"},
+    )
+    uid = create.json()["id"]
+    users = client.get("/api/users").json()
+    assignee = next(u for u in users if u["id"] == uid)
+
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+    card_resp = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Will lose assignee", "details": "", "assignee_id": assignee["id"]},
+    )
+    card_id = card_resp.json()["id"]
+
+    # Delete the user
+    client.delete(f"/api/admin/users/{uid}")
+
+    board = client.get(f"/api/board/{board_id}").json()
+    assert board["cards"][card_id]["assignee_id"] is None
+    assert board["cards"][card_id]["assignee_username"] is None
+
+
+# --- Board statistics ---
+
+
+def test_board_stats_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/boards/1/stats")
+    assert response.status_code == 401
+
+
+def test_board_stats_not_found(client: TestClient) -> None:
+    login(client)
+    response = client.get("/api/boards/99999/stats")
+    assert response.status_code == 404
+
+
+def test_board_stats_returns_correct_counts(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    response = client.get(f"/api/boards/{board_id}/stats")
+    assert response.status_code == 200
+    stats = response.json()
+
+    assert "total_cards" in stats
+    assert "overdue_count" in stats
+    assert "cards_per_column" in stats
+    assert "cards_by_priority" in stats
+    assert isinstance(stats["total_cards"], int)
+    assert stats["total_cards"] >= 8  # seeded cards
+    assert isinstance(stats["overdue_count"], int)
+    assert isinstance(stats["cards_per_column"], list)
+    assert len(stats["cards_per_column"]) == 5
+
+
+def test_board_stats_reflect_card_changes(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    initial = client.get(f"/api/boards/{board_id}/stats").json()["total_cards"]
+
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+    client.post(f"/api/boards/{board_id}/cards", json={"columnId": col_id, "title": "New", "details": ""})
+
+    updated = client.get(f"/api/boards/{board_id}/stats").json()["total_cards"]
+    assert updated == initial + 1
+
+
+def test_board_stats_overdue_count(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Overdue card", "details": "", "due_date": "2020-01-01"},
+    )
+
+    stats = client.get(f"/api/boards/{board_id}/stats").json()
+    assert stats["overdue_count"] >= 1
+
+
+# --- Card comments ---
+
+
+def test_comments_require_auth(client: TestClient) -> None:
+    response = client.get("/api/boards/1/cards/1/comments")
+    assert response.status_code == 401
+
+
+def test_list_comments_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.get(f"/api/boards/{board_id}/cards/99999/comments")
+    assert response.status_code == 404
+
+
+def test_add_and_list_comments(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    add = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/comments",
+        json={"content": "First comment"},
+    )
+    assert add.status_code == 200
+    added = add.json()
+    assert added["content"] == "First comment"
+    assert added["author"] == "user"
+    assert "id" in added
+    assert "createdAt" in added
+
+    comments = client.get(f"/api/boards/{board_id}/cards/{card_id}/comments").json()
+    assert len(comments) == 1
+    assert comments[0]["content"] == "First comment"
+
+
+def test_add_multiple_comments_ordered_by_time(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/comments", json={"content": "Alpha"})
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/comments", json={"content": "Beta"})
+
+    comments = client.get(f"/api/boards/{board_id}/cards/{card_id}/comments").json()
+    assert len(comments) >= 2
+    contents = [c["content"] for c in comments]
+    assert "Alpha" in contents
+    assert "Beta" in contents
+    assert contents.index("Alpha") < contents.index("Beta")
+
+
+def test_add_comment_empty_content_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    response = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/comments",
+        json={"content": "   "},
+    )
+    assert response.status_code == 400
+
+
+def test_add_comment_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.post(
+        f"/api/boards/{board_id}/cards/99999/comments",
+        json={"content": "hello"},
+    )
+    assert response.status_code == 404
+
+
+def test_comments_isolated_per_board(client: TestClient) -> None:
+    login(client)
+    b1 = get_board_id(client)
+    card_id = client.get(f"/api/board/{b1}").json()["columns"][0]["cardIds"][0]
+
+    # Add comment on board 1
+    client.post(f"/api/boards/{b1}/cards/{card_id}/comments", json={"content": "Board1 comment"})
+
+    # Create board 2 with its own card
+    b2_resp = client.post("/api/boards", json={"name": "Second Board"})
+    b2_id = b2_resp.json()["boardId"]
+    b2_col_id = client.get(f"/api/board/{b2_id}").json()["columns"][0]["id"]
+    b2_card_resp = client.post(
+        f"/api/boards/{b2_id}/cards",
+        json={"columnId": b2_col_id, "title": "Board2 card", "details": ""},
+    )
+    b2_card_id = b2_card_resp.json()["id"]
+
+    b2_comments = client.get(f"/api/boards/{b2_id}/cards/{b2_card_id}/comments").json()
+    assert not any(c["content"] == "Board1 comment" for c in b2_comments)

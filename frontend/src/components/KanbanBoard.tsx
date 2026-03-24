@@ -15,7 +15,14 @@ import {
 } from "@dnd-kit/core";
 import { KanbanColumn } from "@/components/KanbanColumn";
 import { KanbanCardPreview } from "@/components/KanbanCardPreview";
-import { initialData, type BoardData, type Column, type Priority } from "@/lib/kanban";
+import {
+  initialData,
+  type AssignableUser,
+  type BoardData,
+  type BoardStats,
+  type Column,
+  type Priority,
+} from "@/lib/kanban";
 import type { MoveDirection } from "@/components/KanbanCard";
 
 export const KanbanBoard = ({ boardId }: { boardId: string }) => {
@@ -29,6 +36,18 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatSubmitting, setChatSubmitting] = useState(false);
+
+  // Users for card assignment
+  const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
+
+  // Board statistics
+  const [stats, setStats] = useState<BoardStats | null>(null);
+
+  // Filter state
+  const [filterText, setFilterText] = useState("");
+  const [filterPriority, setFilterPriority] = useState<Priority | "">("");
+  const [filterLabel, setFilterLabel] = useState("");
+  const [filterAssignee, setFilterAssignee] = useState("");
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -85,12 +104,37 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     }
   }, [boardId]);
 
+  const loadUsers = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const response = await apiRef.current("/api/users", { method: "GET", signal });
+      const payload = (await response.json()) as AssignableUser[];
+      if (!signal?.aborted) setAssignableUsers(payload);
+    } catch {
+      if (!signal?.aborted) setAssignableUsers([]);
+    }
+  }, []);
+
+  const loadStats = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const response = await apiRef.current(`/api/boards/${boardId}/stats`, { method: "GET", signal });
+      const payload = (await response.json()) as BoardStats;
+      if (!signal?.aborted) setStats(payload);
+    } catch {
+      // stats are non-critical; silently ignore failures
+    }
+  }, [boardId]);
+
   useEffect(() => {
     const controller = new AbortController();
     abortRef.current = controller;
-    void Promise.all([loadBoard(controller.signal), loadChat(controller.signal)]);
+    void Promise.all([
+      loadBoard(controller.signal),
+      loadChat(controller.signal),
+      loadUsers(controller.signal),
+      loadStats(controller.signal),
+    ]);
     return () => controller.abort();
-  }, [loadBoard, loadChat]);
+  }, [loadBoard, loadChat, loadUsers, loadStats]);
 
   useEffect(() => {
     setBoardNameDraft(board?.name ?? initialData.name);
@@ -114,6 +158,30 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
 
   const findColumnByCardId = (columns: Column[], cardId: string) =>
     columns.find((column) => column.cardIds.includes(cardId));
+
+  // Compute filtered columns based on active filters
+  const filteredColumns = useMemo(() => {
+    if (!board) return [];
+    const textLower = filterText.trim().toLowerCase();
+    const labelLower = filterLabel.trim().toLowerCase();
+    const hasFilters = textLower || filterPriority || labelLower || filterAssignee;
+    if (!hasFilters) return board.columns;
+
+    return board.columns.map((col) => {
+      const filteredIds = col.cardIds.filter((cardId) => {
+        const card = board.cards[cardId];
+        if (!card) return false;
+        if (textLower && !card.title.toLowerCase().includes(textLower) && !card.details.toLowerCase().includes(textLower)) return false;
+        if (filterPriority && card.priority !== filterPriority) return false;
+        if (labelLower && !(card.labels ?? []).some((l) => l.toLowerCase().includes(labelLower))) return false;
+        if (filterAssignee && card.assignee_id !== filterAssignee) return false;
+        return true;
+      });
+      return { ...col, cardIds: filteredIds };
+    });
+  }, [board, filterText, filterPriority, filterLabel, filterAssignee]);
+
+  const hasActiveFilters = filterText || filterPriority || filterLabel || filterAssignee;
 
   const handleDragStart = (event: DragStartEvent) => {
     setActiveCardId(event.active.id as string);
@@ -153,7 +221,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
           toIndex: Math.max(0, toIndex),
         }),
       });
-      await loadBoard();
+      await Promise.all([loadBoard(), loadStats()]);
     } catch (moveError) {
       setError(moveError instanceof Error ? moveError.message : "Unable to move card");
     }
@@ -187,13 +255,9 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     try {
       await apiRef.current(`/api/boards/${boardId}/cards`, {
         method: "POST",
-        body: JSON.stringify({
-          columnId,
-          title,
-          details,
-        }),
+        body: JSON.stringify({ columnId, title, details }),
       });
-      await loadBoard();
+      await Promise.all([loadBoard(), loadStats()]);
     } catch (addError) {
       setError(addError instanceof Error ? addError.message : "Unable to add card");
     }
@@ -202,7 +266,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
   const handleDeleteCard = async (_columnId: string, cardId: string) => {
     try {
       await apiRef.current(`/api/boards/${boardId}/cards/${cardId}`, { method: "DELETE" });
-      await loadBoard();
+      await Promise.all([loadBoard(), loadStats()]);
     } catch (deleteError) {
       setError(deleteError instanceof Error ? deleteError.message : "Unable to delete card");
     }
@@ -215,13 +279,14 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     due_date: string | null,
     priority: Priority | null,
     labels: string[],
+    assignee_id: string | null,
   ) => {
     try {
       await apiRef.current(`/api/boards/${boardId}/cards/${cardId}`, {
         method: "PUT",
-        body: JSON.stringify({ title, details, due_date, priority, labels }),
+        body: JSON.stringify({ title, details, due_date, priority, labels, assignee_id }),
       });
-      await loadBoard();
+      await Promise.all([loadBoard(), loadStats()]);
     } catch (editError) {
       setError(editError instanceof Error ? editError.message : "Unable to edit card");
     }
@@ -285,6 +350,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
 
       if (payload.board) {
         setBoard(payload.board);
+        void loadStats();
       }
       setChatMessages((prev) => {
         const next = [
@@ -366,13 +432,29 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                 and capture quick notes without getting buried in settings.
               </p>
             </div>
-            <div className="rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] px-5 py-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[var(--gray-text)]">
-                Focus
-              </p>
-              <p className="mt-2 text-lg font-semibold text-[var(--primary-blue)]">
-                Five columns. Zero clutter.
-              </p>
+            <div className="flex flex-col gap-3">
+              <div className="rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] px-5 py-4">
+                <p className="text-xs font-semibold uppercase tracking-[0.25em] text-[var(--gray-text)]">
+                  Focus
+                </p>
+                <p className="mt-2 text-lg font-semibold text-[var(--primary-blue)]">
+                  Five columns. Zero clutter.
+                </p>
+              </div>
+              {stats && (
+                <div className="flex gap-3">
+                  <div className="flex-1 rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] px-4 py-3 text-center" data-testid="stats-total">
+                    <p className="text-2xl font-bold text-[var(--navy-dark)]">{stats.total_cards}</p>
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--gray-text)]">Cards</p>
+                  </div>
+                  {stats.overdue_count > 0 && (
+                    <div className="flex-1 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-center" data-testid="stats-overdue">
+                      <p className="text-2xl font-bold text-red-600">{stats.overdue_count}</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-red-500">Overdue</p>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-4">
@@ -386,6 +468,64 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
               </div>
             ))}
           </div>
+
+          {/* Filter bar */}
+          <div className="flex flex-wrap items-center gap-3" data-testid="filter-bar">
+            <input
+              value={filterText}
+              onChange={(e) => setFilterText(e.target.value)}
+              placeholder="Search cards..."
+              className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none ring-[var(--primary-blue)]/30 focus:ring"
+              aria-label="Search cards"
+            />
+            <select
+              value={filterPriority}
+              onChange={(e) => setFilterPriority(e.target.value as Priority | "")}
+              className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none"
+              aria-label="Filter by priority"
+            >
+              <option value="">All priorities</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="critical">Critical</option>
+            </select>
+            <input
+              value={filterLabel}
+              onChange={(e) => setFilterLabel(e.target.value)}
+              placeholder="Filter by label..."
+              className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none ring-[var(--primary-blue)]/30 focus:ring"
+              aria-label="Filter by label"
+            />
+            {assignableUsers.length > 0 && (
+              <select
+                value={filterAssignee}
+                onChange={(e) => setFilterAssignee(e.target.value)}
+                className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none"
+                aria-label="Filter by assignee"
+              >
+                <option value="">All assignees</option>
+                {assignableUsers.map((u) => (
+                  <option key={u.id} value={u.id}>{u.username}</option>
+                ))}
+              </select>
+            )}
+            {hasActiveFilters && (
+              <button
+                type="button"
+                onClick={() => {
+                  setFilterText("");
+                  setFilterPriority("");
+                  setFilterLabel("");
+                  setFilterAssignee("");
+                }}
+                className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm font-semibold text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+                aria-label="Clear filters"
+              >
+                Clear filters
+              </button>
+            )}
+          </div>
         </header>
 
         <DndContext
@@ -396,11 +536,13 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
         >
           <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
             <section className="grid gap-6 lg:grid-cols-5">
-              {safeBoard.columns.map((column, colIdx) => (
+              {filteredColumns.map((column, colIdx) => (
                 <KanbanColumn
                   key={column.id}
                   column={column}
-                  cards={column.cardIds.map((cardId) => safeBoard.cards[cardId])}
+                  boardId={boardId}
+                  assignableUsers={assignableUsers}
+                  cards={column.cardIds.map((cardId) => safeBoard.cards[cardId]).filter(Boolean)}
                   isFirstColumn={colIdx === 0}
                   isLastColumn={colIdx === safeBoard.columns.length - 1}
                   onRename={handleRenameColumn}

@@ -8,6 +8,12 @@ from app.schemas import CreateCardPayload, UpdateCardPayload, MoveCardPayload
 router = APIRouter(prefix="/api/boards", tags=["cards"])
 
 
+def _parse_assignee_id(raw: str | None) -> int | None:
+    if raw and raw.isdigit():
+        return int(raw)
+    return None
+
+
 @router.post("/{board_id}/cards")
 def create_card(request: Request, board_id: str, payload: CreateCardPayload) -> dict[str, object]:
     user_id = require_user_id(request)
@@ -20,6 +26,7 @@ def create_card(request: Request, board_id: str, payload: CreateCardPayload) -> 
             due_date=payload.due_date,
             priority=payload.priority,
             labels=payload.labels,
+            assignee_id=_parse_assignee_id(payload.assignee_id),
         )
     except db.ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -44,6 +51,7 @@ def update_card(
             due_date=payload.due_date,
             priority=payload.priority,
             labels=payload.labels,
+            assignee_id=_parse_assignee_id(payload.assignee_id),
         )
     except db.ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

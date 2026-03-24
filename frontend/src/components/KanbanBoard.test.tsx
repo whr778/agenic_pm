@@ -22,12 +22,46 @@ const boardPayload = {
   },
 };
 
+const mockUsers = [{ id: "1", username: "user" }];
+const mockStats = {
+  total_cards: 3,
+  overdue_count: 1,
+  cards_per_column: [
+    { id: "1", title: "Backlog", count: 2 },
+    { id: "2", title: "To Do", count: 1 },
+    { id: "3", title: "In Progress", count: 0 },
+    { id: "4", title: "Review", count: 0 },
+    { id: "5", title: "Done", count: 0 },
+  ],
+  cards_by_priority: { none: 3 },
+};
+
 beforeEach(() => {
   const boardState = structuredClone(boardPayload);
 
   vi.spyOn(global, "fetch").mockImplementation(async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
+
+    if (url === "/api/users" && method === "GET") {
+      return new Response(JSON.stringify(mockUsers), { status: 200 });
+    }
+
+    if (url.includes("/stats") && method === "GET") {
+      return new Response(JSON.stringify(mockStats), { status: 200 });
+    }
+
+    if (url.includes("/comments") && method === "GET") {
+      return new Response(JSON.stringify([]), { status: 200 });
+    }
+
+    if (url.includes("/comments") && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+      return new Response(
+        JSON.stringify({ id: "99", content: body.content ?? "", author: "user", createdAt: "2026-01-01T00:00:00" }),
+        { status: 200 }
+      );
+    }
 
     if (url.includes("/api/board") && method === "GET") {
       return new Response(JSON.stringify(boardState), { status: 200 });
@@ -665,5 +699,151 @@ describe("KanbanBoard", () => {
     render(<KanbanBoard boardId="1" />);
     expect(await screen.findByText("hello")).toBeInTheDocument();
     expect(screen.getByText("hi there")).toBeInTheDocument();
+  });
+
+  it("renders the filter bar", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    expect(screen.getByTestId("filter-bar")).toBeInTheDocument();
+    expect(screen.getByLabelText("Search cards")).toBeInTheDocument();
+    expect(screen.getByLabelText("Filter by priority")).toBeInTheDocument();
+  });
+
+  it("filters cards by text search", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const searchInput = screen.getByLabelText("Search cards");
+    await userEvent.type(searchInput, "Card one");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("card-1")).toBeInTheDocument();
+      expect(screen.queryByTestId("card-2")).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows clear filters button when filters are active", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const searchInput = screen.getByLabelText("Search cards");
+    await userEvent.type(searchInput, "test");
+
+    expect(screen.getByLabelText("Clear filters")).toBeInTheDocument();
+  });
+
+  it("clears filters when clear button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.type(screen.getByLabelText("Search cards"), "one");
+    await userEvent.click(screen.getByLabelText("Clear filters"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("card-1")).toBeInTheDocument();
+      expect(screen.getByTestId("card-2")).toBeInTheDocument();
+    });
+  });
+
+  it("filters cards by priority", async () => {
+    const payload = structuredClone(boardPayload);
+    payload.cards["1"] = { ...payload.cards["1"], priority: "high" };
+    payload.cards["2"] = { ...payload.cards["2"], priority: "low" };
+
+    vi.mocked(global.fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/users") return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(mockStats), { status: 200 });
+      if (url.includes("/comments")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/api/board") && method === "GET") return new Response(JSON.stringify(payload), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      return new Response(JSON.stringify({ detail: "Not found" }), { status: 404 });
+    });
+
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const priorityFilter = screen.getByLabelText("Filter by priority");
+    await userEvent.selectOptions(priorityFilter, "high");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("card-1")).toBeInTheDocument();
+      expect(screen.queryByTestId("card-2")).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows stats panel when stats load", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    expect(await screen.findByTestId("stats-total")).toHaveTextContent("3");
+    expect(screen.getByTestId("stats-overdue")).toHaveTextContent("1");
+  });
+
+  it("shows assignee badge on cards with assignee_username", async () => {
+    const payload = structuredClone(boardPayload);
+    payload.cards["1"] = { ...payload.cards["1"], assignee_username: "alice" };
+
+    vi.mocked(global.fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/users") return new Response(JSON.stringify(mockUsers), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(mockStats), { status: 200 });
+      if (url.includes("/comments")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/api/board") && method === "GET") return new Response(JSON.stringify(payload), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      return new Response(JSON.stringify({ detail: "Not found" }), { status: 404 });
+    });
+
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    expect(await screen.findByTestId("card-assignee-1")).toBeInTheDocument();
+    expect(screen.getByTestId("card-assignee-1")).toHaveTextContent("A");
+  });
+
+  it("shows and adds comments on a card", async () => {
+    const commentsData = [
+      { id: "c1", content: "First comment", author: "user", createdAt: "2026-01-01" },
+    ];
+
+    vi.mocked(global.fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/users") return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(mockStats), { status: 200 });
+      if (url.includes("/comments") && method === "GET") return new Response(JSON.stringify(commentsData), { status: 200 });
+      if (url.includes("/comments") && method === "POST") {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+        return new Response(
+          JSON.stringify({ id: "c2", content: body.content ?? "", author: "user", createdAt: "2026-01-02" }),
+          { status: 200 }
+        );
+      }
+      if (url.includes("/api/board") && method === "GET") return new Response(JSON.stringify(boardPayload), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      return new Response(JSON.stringify({ detail: "Not found" }), { status: 404 });
+    });
+
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    // Open comments section
+    const card1 = screen.getByTestId("card-1");
+    await userEvent.click(within(card1).getByRole("button", { name: /show comments for card one/i }));
+
+    expect(await within(card1).findByTestId("comments-1")).toBeInTheDocument();
+    expect(within(card1).getByText("First comment")).toBeInTheDocument();
+
+    // Add a new comment
+    const commentInput = within(card1).getByLabelText("New comment");
+    await userEvent.type(commentInput, "My new comment");
+    await userEvent.click(within(card1).getByRole("button", { name: "Post" }));
+
+    await waitFor(() => {
+      expect(within(card1).getByText("My new comment")).toBeInTheDocument();
+    });
   });
 });
