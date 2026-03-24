@@ -1,4 +1,4 @@
-"""Card management routes: create, update, delete, move."""
+"""Card management routes: create, update, archive, restore, move."""
 from fastapi import APIRouter, HTTPException, Request
 
 from app import db
@@ -60,15 +60,49 @@ def update_card(
 
 
 @router.delete("/{board_id}/cards/{card_id}")
-def delete_card(request: Request, board_id: str, card_id: str) -> dict[str, str]:
+def archive_card(request: Request, board_id: str, card_id: str) -> dict[str, str]:
+    """Archive (soft-delete) a card. Use DELETE /cards/{id}/permanent to hard-delete."""
     user_id = require_user_id(request)
     parsed_board_id = parse_numeric_id(board_id, "board_id")
     parsed_card_id = parse_numeric_id(card_id, "card_id")
     try:
-        db.delete_card(user_id, parsed_board_id, parsed_card_id)
+        db.archive_card(user_id, parsed_board_id, parsed_card_id)
     except db.NotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"status": "ok"}
+    return {"status": "archived"}
+
+
+@router.get("/{board_id}/cards/archived")
+def list_archived_cards(request: Request, board_id: str) -> list[dict[str, object]]:
+    user_id = require_user_id(request)
+    parsed_board_id = parse_numeric_id(board_id, "board_id")
+    try:
+        return db.list_archived_cards(user_id, parsed_board_id)
+    except db.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{board_id}/cards/{card_id}/restore")
+def restore_card(request: Request, board_id: str, card_id: str) -> dict[str, object]:
+    user_id = require_user_id(request)
+    parsed_board_id = parse_numeric_id(board_id, "board_id")
+    parsed_card_id = parse_numeric_id(card_id, "card_id")
+    try:
+        return db.restore_card(user_id, parsed_board_id, parsed_card_id)
+    except db.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/{board_id}/cards/{card_id}/permanent")
+def permanent_delete_card(request: Request, board_id: str, card_id: str) -> dict[str, str]:
+    user_id = require_user_id(request)
+    parsed_board_id = parse_numeric_id(board_id, "board_id")
+    parsed_card_id = parse_numeric_id(card_id, "card_id")
+    try:
+        db.permanent_delete_card(user_id, parsed_board_id, parsed_card_id)
+    except db.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"status": "deleted"}
 
 
 @router.post("/{board_id}/cards/{card_id}/move")

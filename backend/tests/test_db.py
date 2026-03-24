@@ -62,7 +62,7 @@ def test_create_update_delete_card_errors(test_db) -> None:
         test_db.update_card(user_id, board_id, 9999, "task", "")
 
     with pytest.raises(test_db.NotFoundError):
-        test_db.delete_card(user_id, board_id, 9999)
+        test_db.archive_card(user_id, board_id, 9999)
 
 
 def test_move_card_validates_negative_index_and_target_column(test_db) -> None:

@@ -17,6 +17,8 @@ import { KanbanColumn } from "@/components/KanbanColumn";
 import { KanbanCardPreview } from "@/components/KanbanCardPreview";
 import {
   initialData,
+  type ActivityEntry,
+  type ArchivedCard,
   type AssignableUser,
   type BoardData,
   type BoardStats,
@@ -48,6 +50,16 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
   const [filterPriority, setFilterPriority] = useState<Priority | "">("");
   const [filterLabel, setFilterLabel] = useState("");
   const [filterAssignee, setFilterAssignee] = useState("");
+
+  // Archived cards panel
+  const [showArchived, setShowArchived] = useState(false);
+  const [archivedCards, setArchivedCards] = useState<ArchivedCard[]>([]);
+  const [archivedLoading, setArchivedLoading] = useState(false);
+
+  // Activity log panel
+  const [showActivity, setShowActivity] = useState(false);
+  const [activityLog, setActivityLog] = useState<ActivityEntry[]>([]);
+  const [activityLoading, setActivityLoading] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -263,13 +275,73 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     }
   };
 
-  const handleDeleteCard = async (_columnId: string, cardId: string) => {
+  const handleArchiveCard = async (_columnId: string, cardId: string) => {
     try {
       await apiRef.current(`/api/boards/${boardId}/cards/${cardId}`, { method: "DELETE" });
       await Promise.all([loadBoard(), loadStats()]);
-    } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete card");
+    } catch (archiveError) {
+      setError(archiveError instanceof Error ? archiveError.message : "Unable to archive card");
     }
+  };
+
+  const loadArchived = async () => {
+    setArchivedLoading(true);
+    try {
+      const response = await apiRef.current(`/api/boards/${boardId}/cards/archived`);
+      const payload = (await response.json()) as ArchivedCard[];
+      setArchivedCards(payload);
+    } catch {
+      setArchivedCards([]);
+    } finally {
+      setArchivedLoading(false);
+    }
+  };
+
+  const handleRestoreCard = async (cardId: string) => {
+    try {
+      await apiRef.current(`/api/boards/${boardId}/cards/${cardId}/restore`, { method: "POST" });
+      await Promise.all([loadBoard(), loadStats(), loadArchived()]);
+    } catch (restoreError) {
+      setError(restoreError instanceof Error ? restoreError.message : "Unable to restore card");
+    }
+  };
+
+  const handlePermanentDelete = async (cardId: string) => {
+    try {
+      await apiRef.current(`/api/boards/${boardId}/cards/${cardId}/permanent`, { method: "DELETE" });
+      await loadArchived();
+    } catch (delError) {
+      setError(delError instanceof Error ? delError.message : "Unable to delete card");
+    }
+  };
+
+  const loadActivity = async () => {
+    setActivityLoading(true);
+    try {
+      const response = await apiRef.current(`/api/boards/${boardId}/activity?limit=50`);
+      const payload = (await response.json()) as ActivityEntry[];
+      setActivityLog(payload);
+    } catch {
+      setActivityLog([]);
+    } finally {
+      setActivityLoading(false);
+    }
+  };
+
+  const handleExport = (format: "json" | "csv") => {
+    window.open(`/api/boards/${boardId}/export?format=${format}`, "_blank");
+  };
+
+  const handleToggleArchived = () => {
+    const next = !showArchived;
+    setShowArchived(next);
+    if (next) void loadArchived();
+  };
+
+  const handleToggleActivity = () => {
+    const next = !showActivity;
+    setShowActivity(next);
+    if (next) void loadActivity();
   };
 
   const handleEditCard = async (
@@ -469,6 +541,46 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
             ))}
           </div>
 
+          {/* Action buttons */}
+          <div className="flex flex-wrap items-center gap-2" data-testid="action-bar">
+            <button
+              type="button"
+              onClick={handleToggleArchived}
+              className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${showArchived ? "border-[var(--secondary-purple)] bg-[var(--secondary-purple)]/10 text-[var(--secondary-purple)]" : "border-[var(--stroke)] text-[var(--gray-text)] hover:text-[var(--navy-dark)]"}`}
+              aria-label="Toggle archived cards"
+              data-testid="archived-toggle"
+            >
+              Archived
+            </button>
+            <button
+              type="button"
+              onClick={handleToggleActivity}
+              className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${showActivity ? "border-[var(--primary-blue)] bg-[var(--primary-blue)]/10 text-[var(--primary-blue)]" : "border-[var(--stroke)] text-[var(--gray-text)] hover:text-[var(--navy-dark)]"}`}
+              aria-label="Toggle activity log"
+              data-testid="activity-toggle"
+            >
+              Activity
+            </button>
+            <button
+              type="button"
+              onClick={() => handleExport("json")}
+              className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm font-semibold text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+              aria-label="Export board as JSON"
+              data-testid="export-json"
+            >
+              Export JSON
+            </button>
+            <button
+              type="button"
+              onClick={() => handleExport("csv")}
+              className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm font-semibold text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+              aria-label="Export board as CSV"
+              data-testid="export-csv"
+            >
+              Export CSV
+            </button>
+          </div>
+
           {/* Filter bar */}
           <div className="flex flex-wrap items-center gap-3" data-testid="filter-bar">
             <input
@@ -547,7 +659,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                   isLastColumn={colIdx === safeBoard.columns.length - 1}
                   onRename={handleRenameColumn}
                   onAddCard={handleAddCard}
-                  onDeleteCard={handleDeleteCard}
+                  onArchiveCard={handleArchiveCard}
                   onEditCard={handleEditCard}
                   onMoveCard={handleMoveCard}
                 />
@@ -610,6 +722,89 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
               {error}
             </p>
           ) : null}
+
+          {/* Archived cards panel */}
+          {showArchived && (
+            <section
+              className="rounded-[28px] border border-[var(--stroke)] bg-white/90 p-6 shadow-[var(--shadow)]"
+              data-testid="archived-panel"
+            >
+              <h2 className="font-display text-xl font-semibold text-[var(--navy-dark)]">Archived Cards</h2>
+              {archivedLoading ? (
+                <p className="mt-4 text-sm text-[var(--gray-text)]">Loading...</p>
+              ) : archivedCards.length === 0 ? (
+                <p className="mt-4 text-sm text-[var(--gray-text)]">No archived cards.</p>
+              ) : (
+                <ul className="mt-4 space-y-3">
+                  {archivedCards.map((card) => (
+                    <li
+                      key={card.id}
+                      className="flex items-center justify-between gap-4 rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] px-4 py-3"
+                      data-testid={`archived-card-${card.id}`}
+                    >
+                      <div className="min-w-0">
+                        <p className="font-semibold text-[var(--navy-dark)]">{card.title}</p>
+                        <p className="text-xs text-[var(--gray-text)]">{card.columnTitle}</p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleRestoreCard(card.id)}
+                          className="rounded-xl border border-[var(--primary-blue)] px-3 py-1.5 text-xs font-semibold text-[var(--primary-blue)] hover:bg-[var(--primary-blue)]/10"
+                          aria-label={`Restore ${card.title}`}
+                        >
+                          Restore
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handlePermanentDelete(card.id)}
+                          className="rounded-xl border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50"
+                          aria-label={`Permanently delete ${card.title}`}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+
+          {/* Activity log panel */}
+          {showActivity && (
+            <section
+              className="rounded-[28px] border border-[var(--stroke)] bg-white/90 p-6 shadow-[var(--shadow)]"
+              data-testid="activity-panel"
+            >
+              <h2 className="font-display text-xl font-semibold text-[var(--navy-dark)]">Activity Log</h2>
+              {activityLoading ? (
+                <p className="mt-4 text-sm text-[var(--gray-text)]">Loading...</p>
+              ) : activityLog.length === 0 ? (
+                <p className="mt-4 text-sm text-[var(--gray-text)]">No activity yet.</p>
+              ) : (
+                <ul className="mt-4 space-y-2">
+                  {activityLog.map((entry) => (
+                    <li
+                      key={entry.id}
+                      className="flex items-baseline gap-3 rounded-xl px-3 py-2 even:bg-[var(--surface)]"
+                      data-testid={`activity-entry-${entry.id}`}
+                    >
+                      <span className="w-28 shrink-0 text-xs text-[var(--gray-text)]">
+                        {new Date(entry.createdAt).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      </span>
+                      <span className="text-xs font-semibold text-[var(--navy-dark)]">{entry.actor}</span>
+                      <span className="text-xs text-[var(--gray-text)]">
+                        {entry.action.replace(/_/g, " ")}
+                        {entry.detail ? `: ${entry.detail}` : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+
           <DragOverlay>
             {activeCard ? (
               <div className="w-[260px]">

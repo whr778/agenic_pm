@@ -63,6 +63,26 @@ beforeEach(() => {
       );
     }
 
+    if (url.includes("/archived") && method === "GET") {
+      return new Response(JSON.stringify([
+        { id: "99", columnId: "1", columnTitle: "Backlog", title: "Archived card", details: "", due_date: null, priority: null, labels: [] },
+      ]), { status: 200 });
+    }
+
+    if (url.includes("/restore") && method === "POST") {
+      return new Response(JSON.stringify({ id: "99", columnId: "1", title: "Archived card" }), { status: 200 });
+    }
+
+    if (url.includes("/permanent") && method === "DELETE") {
+      return new Response(JSON.stringify({ status: "deleted" }), { status: 200 });
+    }
+
+    if (url.includes("/activity") && method === "GET") {
+      return new Response(JSON.stringify([
+        { id: "1", actor: "user", action: "create_card", entity_type: "card", entity_id: 1, detail: "Card one", createdAt: "2026-01-01T10:00:00" },
+      ]), { status: 200 });
+    }
+
     if (url.includes("/api/board") && method === "GET") {
       return new Response(JSON.stringify(boardState), { status: 200 });
     }
@@ -109,7 +129,7 @@ beforeEach(() => {
     }
 
     if (url.includes("/cards/") && method === "DELETE") {
-      return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      return new Response(JSON.stringify({ status: "archived" }), { status: 200 });
     }
 
     if (url.includes("/cards/") && method === "PUT") {
@@ -214,7 +234,7 @@ describe("KanbanBoard", () => {
     });
 
     const deleteButton = within(column).getByRole("button", {
-      name: /delete card one/i,
+      name: /archive card one/i,
     });
     await userEvent.click(deleteButton);
 
@@ -368,7 +388,7 @@ describe("KanbanBoard", () => {
     render(<KanbanBoard boardId="1" />);
     await screen.findAllByTestId(/column-/i);
 
-    await userEvent.click(screen.getByRole("button", { name: /delete card one/i }));
+    await userEvent.click(screen.getByRole("button", { name: /archive card one/i }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Request failed: 500");
   });
 
@@ -845,5 +865,96 @@ describe("KanbanBoard", () => {
     await waitFor(() => {
       expect(within(card1).getByText("My new comment")).toBeInTheDocument();
     });
+  });
+
+  it("renders action bar with archived, activity, and export buttons", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    expect(screen.getByTestId("action-bar")).toBeInTheDocument();
+    expect(screen.getByLabelText("Toggle archived cards")).toBeInTheDocument();
+    expect(screen.getByLabelText("Toggle activity log")).toBeInTheDocument();
+    expect(screen.getByLabelText("Export board as JSON")).toBeInTheDocument();
+    expect(screen.getByLabelText("Export board as CSV")).toBeInTheDocument();
+  });
+
+  it("shows archived panel with cards when toggle is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByLabelText("Toggle archived cards"));
+
+    expect(await screen.findByTestId("archived-panel")).toBeInTheDocument();
+    expect(await screen.findByTestId("archived-card-99")).toBeInTheDocument();
+    expect(screen.getByText("Archived card")).toBeInTheDocument();
+  });
+
+  it("restores a card from the archived panel", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByLabelText("Toggle archived cards"));
+    await screen.findByTestId("archived-card-99");
+
+    await userEvent.click(screen.getByLabelText("Restore Archived card"));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/boards/1/cards/99/restore",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+  });
+
+  it("permanently deletes a card from the archived panel", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByLabelText("Toggle archived cards"));
+    await screen.findByTestId("archived-card-99");
+
+    await userEvent.click(screen.getByLabelText("Permanently delete Archived card"));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/boards/1/cards/99/permanent",
+        expect.objectContaining({ method: "DELETE" })
+      );
+    });
+  });
+
+  it("hides archived panel when toggle is clicked again", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const archivedToggle = screen.getByLabelText("Toggle archived cards");
+    await userEvent.click(archivedToggle);
+    await screen.findByTestId("archived-panel");
+
+    await userEvent.click(archivedToggle);
+    expect(screen.queryByTestId("archived-panel")).not.toBeInTheDocument();
+  });
+
+  it("shows activity panel when toggle is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByLabelText("Toggle activity log"));
+
+    expect(await screen.findByTestId("activity-panel")).toBeInTheDocument();
+    expect(await screen.findByTestId("activity-entry-1")).toBeInTheDocument();
+    expect(screen.getByText(/create card/i)).toBeInTheDocument();
+  });
+
+  it("hides activity panel when toggle is clicked again", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const activityToggle = screen.getByLabelText("Toggle activity log");
+    await userEvent.click(activityToggle);
+    await screen.findByTestId("activity-panel");
+
+    await userEvent.click(activityToggle);
+    expect(screen.queryByTestId("activity-panel")).not.toBeInTheDocument();
   });
 });

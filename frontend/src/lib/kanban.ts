@@ -30,6 +30,27 @@ export type Comment = {
   createdAt: string;
 };
 
+export type ArchivedCard = {
+  id: string;
+  columnId: string;
+  columnTitle: string;
+  title: string;
+  details: string;
+  due_date: string | null;
+  priority: Priority | null;
+  labels: string[];
+};
+
+export type ActivityEntry = {
+  id: string;
+  actor: string;
+  action: string;
+  entity_type: string;
+  entity_id: number | null;
+  detail: string;
+  createdAt: string;
+};
+
 export type Column = {
   id: string;
   key?: string;

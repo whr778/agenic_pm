@@ -1373,3 +1373,275 @@ def test_comments_isolated_per_board(client: TestClient) -> None:
 
     b2_comments = client.get(f"/api/boards/{b2_id}/cards/{b2_card_id}/comments").json()
     assert not any(c["content"] == "Board1 comment" for c in b2_comments)
+
+# --- Archive / restore cards ---
+
+
+def test_archive_card_removes_from_board(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+
+    response = client.delete(f"/api/boards/{board_id}/cards/{card_id}")
+    assert response.status_code == 200
+    assert response.json()["status"] == "archived"
+
+    refreshed = client.get(f"/api/board/{board_id}").json()
+    all_card_ids = [cid for col in refreshed["columns"] for cid in col["cardIds"]]
+    assert card_id not in all_card_ids
+
+
+def test_archived_cards_appear_in_archived_list(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+    card_title = board["cards"][card_id]["title"]
+
+    client.delete(f"/api/boards/{board_id}/cards/{card_id}")
+
+    response = client.get(f"/api/boards/{board_id}/cards/archived")
+    assert response.status_code == 200
+    archived = response.json()
+    assert any(c["id"] == card_id and c["title"] == card_title for c in archived)
+
+
+def test_archived_list_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/boards/1/cards/archived")
+    assert response.status_code == 401
+
+
+def test_restore_card_returns_to_board(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+
+    client.delete(f"/api/boards/{board_id}/cards/{card_id}")
+
+    restore = client.post(f"/api/boards/{board_id}/cards/{card_id}/restore")
+    assert restore.status_code == 200
+    assert restore.json()["id"] == card_id
+
+    refreshed = client.get(f"/api/board/{board_id}").json()
+    all_card_ids = [cid for col in refreshed["columns"] for cid in col["cardIds"]]
+    assert card_id in all_card_ids
+
+
+def test_restore_requires_auth(client: TestClient) -> None:
+    response = client.post("/api/boards/1/cards/1/restore")
+    assert response.status_code == 401
+
+
+def test_restore_non_archived_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+
+    # card is NOT archived — restore should 404
+    response = client.post(f"/api/boards/{board_id}/cards/{card_id}/restore")
+    assert response.status_code == 404
+
+
+def test_permanent_delete_removes_archived_card(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+
+    client.delete(f"/api/boards/{board_id}/cards/{card_id}")
+
+    del_resp = client.delete(f"/api/boards/{board_id}/cards/{card_id}/permanent")
+    assert del_resp.status_code == 200
+    assert del_resp.json()["status"] == "deleted"
+
+    archived = client.get(f"/api/boards/{board_id}/cards/archived").json()
+    assert not any(c["id"] == card_id for c in archived)
+
+
+def test_permanent_delete_requires_archive_first(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+
+    # Not archived — permanent delete should 404
+    response = client.delete(f"/api/boards/{board_id}/cards/{card_id}/permanent")
+    assert response.status_code == 404
+
+
+def test_board_stats_exclude_archived_cards(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    stats_before = client.get(f"/api/boards/{board_id}/stats").json()
+    total_before = stats_before["total_cards"]
+
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+    client.delete(f"/api/boards/{board_id}/cards/{card_id}")
+
+    stats_after = client.get(f"/api/boards/{board_id}/stats").json()
+    assert stats_after["total_cards"] == total_before - 1
+
+
+# --- Board export ---
+
+
+def test_export_board_json(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    response = client.get(f"/api/boards/{board_id}/export?format=json")
+    assert response.status_code == 200
+    assert "application/json" in response.headers["content-type"]
+    body = response.json()
+    assert "board" in body
+    assert "columns" in body
+    assert "cards" in body
+    assert "exportedAt" in body
+    assert isinstance(body["cards"], list)
+    assert len(body["cards"]) > 0
+
+
+def test_export_board_csv(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    response = client.get(f"/api/boards/{board_id}/export?format=csv")
+    assert response.status_code == 200
+    assert "text/csv" in response.headers["content-type"]
+    lines = response.text.strip().split("\n")
+    # First line is headers
+    assert "column" in lines[0].lower()
+    assert "title" in lines[0].lower()
+    # At least one data row (seeded cards)
+    assert len(lines) > 1
+
+
+def test_export_board_default_is_json(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+
+    response = client.get(f"/api/boards/{board_id}/export")
+    assert response.status_code == 200
+    assert "application/json" in response.headers["content-type"]
+
+
+def test_export_board_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/boards/1/export")
+    assert response.status_code == 401
+
+
+def test_export_board_invalid_format(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.get(f"/api/boards/{board_id}/export?format=xlsx")
+    assert response.status_code == 422
+
+
+def test_export_excludes_archived_cards(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+    card_title = board["cards"][card_id]["title"]
+
+    client.delete(f"/api/boards/{board_id}/cards/{card_id}")
+
+    response = client.get(f"/api/boards/{board_id}/export?format=json")
+    body = response.json()
+    titles = [c["title"] for c in body["cards"]]
+    assert card_title not in titles
+
+
+# --- Activity log ---
+
+
+def test_activity_log_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/boards/1/activity")
+    assert response.status_code == 401
+
+
+def test_activity_log_records_create_card(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Activity test card", "details": ""},
+    )
+
+    response = client.get(f"/api/boards/{board_id}/activity")
+    assert response.status_code == 200
+    log = response.json()
+    assert any(e["action"] == "create_card" and e["detail"] == "Activity test card" for e in log)
+
+
+def test_activity_log_records_archive_and_restore(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+
+    client.delete(f"/api/boards/{board_id}/cards/{card_id}")
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/restore")
+
+    log = client.get(f"/api/boards/{board_id}/activity").json()
+    actions = [e["action"] for e in log]
+    assert "archive_card" in actions
+    assert "restore_card" in actions
+
+
+def test_activity_log_records_move_card(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    card_id = board["columns"][0]["cardIds"][0]
+    target_col = board["columns"][1]["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/move",
+        json={"toColumnId": target_col, "toIndex": 0},
+    )
+
+    log = client.get(f"/api/boards/{board_id}/activity").json()
+    assert any(e["action"] == "move_card" for e in log)
+
+
+def test_activity_log_actor_matches_logged_in_user(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Actor test", "details": ""},
+    )
+
+    log = client.get(f"/api/boards/{board_id}/activity").json()
+    create_entry = next(e for e in log if e["action"] == "create_card" and e["detail"] == "Actor test")
+    assert create_entry["actor"] == "user"
+
+
+def test_activity_log_not_found_for_wrong_board(client: TestClient) -> None:
+    login(client)
+    response = client.get("/api/boards/99999/activity")
+    assert response.status_code == 404
+
+
+def test_activity_log_limit_param(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    for i in range(5):
+        client.post(
+            f"/api/boards/{board_id}/cards",
+            json={"columnId": col_id, "title": f"Log card {i}", "details": ""},
+        )
+
+    log = client.get(f"/api/boards/{board_id}/activity?limit=3").json()
+    assert len(log) <= 3

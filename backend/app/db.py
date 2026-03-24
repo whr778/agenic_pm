@@ -140,7 +140,7 @@ def _migrate_boards_unique_constraint(connection: sqlite3.Connection) -> None:
 
 
 def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
-    """Add due_date, priority, labels, and assignee_id columns to existing cards table."""
+    """Add due_date, priority, labels, assignee_id, and archived columns to existing cards table."""
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(cards)").fetchall()
@@ -153,6 +153,8 @@ def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE cards ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'")
     if "assignee_id" not in columns:
         connection.execute("ALTER TABLE cards ADD COLUMN assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
+    if "archived" not in columns:
+        connection.execute("ALTER TABLE cards ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
 
 
 def init_db() -> None:
@@ -202,12 +204,28 @@ def init_db() -> None:
               priority TEXT,
               labels TEXT NOT NULL DEFAULT '[]',
               assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+              archived INTEGER NOT NULL DEFAULT 0,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
               updated_at TEXT NOT NULL DEFAULT (datetime('now')),
               FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE,
               FOREIGN KEY (column_id) REFERENCES board_columns(id) ON DELETE CASCADE,
               UNIQUE(column_id, position)
             );
+
+            CREATE TABLE IF NOT EXISTS activity_log (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              board_id INTEGER NOT NULL,
+              user_id INTEGER NOT NULL,
+              actor TEXT NOT NULL,
+              action TEXT NOT NULL,
+              entity_type TEXT NOT NULL,
+              entity_id INTEGER,
+              detail TEXT NOT NULL DEFAULT '',
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_activity_log_board_id ON activity_log(board_id, created_at);
 
             CREATE TABLE IF NOT EXISTS chat_messages (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -585,7 +603,7 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
                    u.username AS assignee_username
             FROM cards c
             LEFT JOIN users u ON c.assignee_id = u.id
-            WHERE c.board_id = ?
+            WHERE c.board_id = ? AND c.archived = 0
             ORDER BY c.column_id ASC, c.position ASC
             """,
             (board_id,),
@@ -645,6 +663,7 @@ def rename_column(user_id: int, board_id: int, column_id: int, title: str) -> di
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
         normalized = _rename_column_conn(connection, board_id, column_id, title)
+        _log_activity_conn(connection, board_id, user_id, "rename_column", "column", column_id, normalized)
     return {"id": str(column_id), "title": normalized}
 
 
@@ -666,6 +685,7 @@ def create_card(
             connection, board_id, column_id, title, details,
             due_date=due_date, priority=priority, labels=labels, assignee_id=assignee_id,
         )
+        _log_activity_conn(connection, board_id, user_id, "create_card", "card", card_id, norm_title)
     return {
         "id": str(card_id),
         "columnId": str(column_id),
@@ -696,6 +716,7 @@ def update_card(
             connection, board_id, card_id, title, details,
             due_date=due_date, priority=priority, labels=labels, assignee_id=assignee_id,
         )
+        _log_activity_conn(connection, board_id, user_id, "update_card", "card", card_id, norm_title)
     return {
         "id": str(card_id),
         "title": norm_title,
@@ -707,10 +728,45 @@ def update_card(
     }
 
 
-def delete_card(user_id: int, board_id: int, card_id: int) -> None:
+def archive_card(user_id: int, board_id: int, card_id: int) -> None:
+    """Soft-delete a card (sets archived=1)."""
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
-        _delete_card_conn(connection, board_id, card_id)
+        title = _archive_card_conn(connection, board_id, card_id)
+        _log_activity_conn(connection, board_id, user_id, "archive_card", "card", card_id, title)
+
+
+def restore_card(user_id: int, board_id: int, card_id: int) -> dict[str, object]:
+    """Restore an archived card to the bottom of its original column."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        archived = connection.execute(
+            "SELECT id, column_id, title FROM cards WHERE id = ? AND board_id = ? AND archived = 1",
+            (card_id, board_id),
+        ).fetchone()
+        if archived is None:
+            raise NotFoundError("Archived card not found")
+        col_id = int(archived["column_id"])
+        title = str(archived["title"])
+        pos_row = connection.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM cards WHERE column_id = ? AND archived = 0",
+            (col_id,),
+        ).fetchone()
+        next_pos = int(pos_row["next_pos"]) if pos_row else 0
+        connection.execute(
+            "UPDATE cards SET archived = 0, position = ?, updated_at = datetime('now') WHERE id = ?",
+            (next_pos, card_id),
+        )
+        _log_activity_conn(connection, board_id, user_id, "restore_card", "card", card_id, title)
+    return {"id": str(card_id), "columnId": str(col_id), "title": title}
+
+
+def permanent_delete_card(user_id: int, board_id: int, card_id: int) -> None:
+    """Hard-delete an archived card."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        _permanent_delete_card_conn(connection, board_id, card_id)
+        _log_activity_conn(connection, board_id, user_id, "permanent_delete_card", "card", card_id)
 
 
 def _reorder_card(
@@ -725,11 +781,11 @@ def _reorder_card(
     Caller must already be inside a transaction.
     """
     source_rows = connection.execute(
-        "SELECT id FROM cards WHERE column_id = ? ORDER BY position ASC",
+        "SELECT id FROM cards WHERE column_id = ? AND archived = 0 ORDER BY position ASC",
         (source_column_id,),
     ).fetchall()
     target_rows = connection.execute(
-        "SELECT id FROM cards WHERE column_id = ? ORDER BY position ASC",
+        "SELECT id FROM cards WHERE column_id = ? AND archived = 0 ORDER BY position ASC",
         (target_column_id,),
     ).fetchall()
 
@@ -841,7 +897,7 @@ def _create_card_conn(
     if row is None:
         raise NotFoundError("Column not found")
     position_row = connection.execute(
-        "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM cards WHERE column_id = ?",
+        "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM cards WHERE column_id = ? AND archived = 0",
         (column_id,),
     ).fetchone()
     assert position_row is not None
@@ -891,19 +947,59 @@ def _update_card_conn(
     return normalized_title, normalized_details
 
 
-def _delete_card_conn(connection: sqlite3.Connection, board_id: int, card_id: int) -> None:
+def _archive_card_conn(connection: sqlite3.Connection, board_id: int, card_id: int) -> str:
+    """Soft-delete: set archived=1 and compact the column's positions. Returns card title."""
     card = connection.execute(
-        "SELECT id, column_id, position FROM cards WHERE id = ? AND board_id = ?",
+        "SELECT id, column_id, position, title FROM cards WHERE id = ? AND board_id = ? AND archived = 0",
         (card_id, board_id),
     ).fetchone()
     if card is None:
         raise NotFoundError("Card not found")
     col_id = int(card["column_id"])
     position = int(card["position"])
-    connection.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+    title = str(card["title"])
+    # Use -card_id as position for archived cards to avoid UNIQUE(column_id, position) conflicts
     connection.execute(
-        "UPDATE cards SET position = position - 1 WHERE column_id = ? AND position > ?",
+        "UPDATE cards SET archived = 1, position = ?, updated_at = datetime('now') WHERE id = ?",
+        (-card_id, card_id),
+    )
+    connection.execute(
+        "UPDATE cards SET position = position - 1 WHERE column_id = ? AND archived = 0 AND position > ?",
         (col_id, position),
+    )
+    return title
+
+
+def _permanent_delete_card_conn(connection: sqlite3.Connection, board_id: int, card_id: int) -> None:
+    """Hard-delete an archived card."""
+    card = connection.execute(
+        "SELECT id FROM cards WHERE id = ? AND board_id = ? AND archived = 1",
+        (card_id, board_id),
+    ).fetchone()
+    if card is None:
+        raise NotFoundError("Archived card not found")
+    connection.execute("DELETE FROM cards WHERE id = ?", (card_id,))
+
+
+def _log_activity_conn(
+    connection: sqlite3.Connection,
+    board_id: int,
+    user_id: int,
+    action: str,
+    entity_type: str,
+    entity_id: int | None,
+    detail: str = "",
+) -> None:
+    actor_row = connection.execute(
+        "SELECT username FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+    actor = str(actor_row["username"]) if actor_row else "unknown"
+    connection.execute(
+        """
+        INSERT INTO activity_log (board_id, user_id, actor, action, entity_type, entity_id, detail)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (board_id, user_id, actor, action, entity_type, entity_id, detail),
     )
 
 
@@ -933,6 +1029,9 @@ def move_card(user_id: int, board_id: int, card_id: int, target_column_id: int, 
         _get_board(connection, user_id, board_id)
         with connection:
             adjusted = _move_card_conn(connection, board_id, card_id, target_column_id, target_index)
+            card_row = connection.execute("SELECT title FROM cards WHERE id = ?", (card_id,)).fetchone()
+            detail = str(card_row["title"]) if card_row else ""
+            _log_activity_conn(connection, board_id, user_id, "move_card", "card", card_id, detail)
     return {"id": str(card_id), "columnId": str(target_column_id), "position": str(adjusted)}
 
 
@@ -1010,7 +1109,7 @@ def apply_updates_atomically(user_id: int, board_id: int, updates: list[dict[str
                         assignee_id=int(str(raw_assignee)) if raw_assignee else None,
                     )
                 elif update_type == "delete_card":
-                    _delete_card_conn(
+                    _archive_card_conn(
                         connection, board_id,
                         int(str(update.get("cardId", ""))),
                     )
@@ -1045,7 +1144,7 @@ def get_board_stats(user_id: int, board_id: int) -> dict[str, object]:
             SELECT bc.id, bc.title,
                    COUNT(c.id) AS card_count
             FROM board_columns bc
-            LEFT JOIN cards c ON c.column_id = bc.id AND c.board_id = ?
+            LEFT JOIN cards c ON c.column_id = bc.id AND c.board_id = ? AND c.archived = 0
             WHERE bc.board_id = ?
             GROUP BY bc.id, bc.title
             ORDER BY bc.position ASC
@@ -1054,21 +1153,21 @@ def get_board_stats(user_id: int, board_id: int) -> dict[str, object]:
         ).fetchall()
 
         overdue_row = connection.execute(
-            "SELECT COUNT(*) AS cnt FROM cards WHERE board_id = ? AND due_date IS NOT NULL AND due_date < ?",
+            "SELECT COUNT(*) AS cnt FROM cards WHERE board_id = ? AND archived = 0 AND due_date IS NOT NULL AND due_date < ?",
             (board_id, today),
         ).fetchone()
 
         priority_rows = connection.execute(
             """
             SELECT COALESCE(priority, 'none') AS priority, COUNT(*) AS cnt
-            FROM cards WHERE board_id = ?
+            FROM cards WHERE board_id = ? AND archived = 0
             GROUP BY priority
             """,
             (board_id,),
         ).fetchall()
 
         total_row = connection.execute(
-            "SELECT COUNT(*) AS cnt FROM cards WHERE board_id = ?",
+            "SELECT COUNT(*) AS cnt FROM cards WHERE board_id = ? AND archived = 0",
             (board_id,),
         ).fetchone()
 
@@ -1138,6 +1237,126 @@ def add_card_comment(user_id: int, board_id: int, card_id: int, content: str) ->
         "content": normalized,
         "author": str(author_row["username"]) if author_row else "",
         "createdAt": __import__("datetime").datetime.utcnow().isoformat(),
+    }
+
+
+def list_archived_cards(user_id: int, board_id: int) -> list[dict[str, object]]:
+    """Return all archived cards for a board."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        rows = connection.execute(
+            """
+            SELECT c.id, c.column_id, c.title, c.details, c.due_date, c.priority, c.labels,
+                   bc.title AS column_title
+            FROM cards c
+            JOIN board_columns bc ON c.column_id = bc.id
+            WHERE c.board_id = ? AND c.archived = 1
+            ORDER BY c.updated_at DESC
+            """,
+            (board_id,),
+        ).fetchall()
+
+    result = []
+    for row in rows:
+        raw_labels = row["labels"]
+        try:
+            labels = json.loads(raw_labels) if raw_labels else []
+        except (json.JSONDecodeError, TypeError):
+            labels = []
+        result.append({
+            "id": str(row["id"]),
+            "columnId": str(row["column_id"]),
+            "columnTitle": str(row["column_title"]),
+            "title": str(row["title"]),
+            "details": str(row["details"]),
+            "due_date": row["due_date"],
+            "priority": row["priority"],
+            "labels": labels,
+        })
+    return result
+
+
+def list_board_activity(user_id: int, board_id: int, limit: int = 50) -> list[dict[str, object]]:
+    """Return recent activity log entries for a board (newest first)."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        rows = connection.execute(
+            """
+            SELECT id, actor, action, entity_type, entity_id, detail, created_at
+            FROM activity_log
+            WHERE board_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (board_id, limit),
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "actor": str(row["actor"]),
+            "action": str(row["action"]),
+            "entity_type": str(row["entity_type"]),
+            "entity_id": row["entity_id"],
+            "detail": str(row["detail"]),
+            "createdAt": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def export_board_data(user_id: int, board_id: int) -> dict[str, object]:
+    """Return full board snapshot for export (includes columns, cards, column titles)."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        board_row = connection.execute(
+            "SELECT name FROM boards WHERE id = ?", (board_id,)
+        ).fetchone()
+
+        column_rows = connection.execute(
+            "SELECT id, key, title, position FROM board_columns WHERE board_id = ? ORDER BY position ASC",
+            (board_id,),
+        ).fetchall()
+
+        card_rows = connection.execute(
+            """
+            SELECT c.id, c.column_id, c.title, c.details, c.position,
+                   c.due_date, c.priority, c.labels, c.assignee_id,
+                   u.username AS assignee_username,
+                   bc.title AS column_title
+            FROM cards c
+            LEFT JOIN users u ON c.assignee_id = u.id
+            JOIN board_columns bc ON c.column_id = bc.id
+            WHERE c.board_id = ? AND c.archived = 0
+            ORDER BY bc.position ASC, c.position ASC
+            """,
+            (board_id,),
+        ).fetchall()
+
+    columns = [
+        {"id": str(r["id"]), "key": str(r["key"]), "title": str(r["title"])}
+        for r in column_rows
+    ]
+    cards = []
+    for r in card_rows:
+        try:
+            labels = json.loads(r["labels"]) if r["labels"] else []
+        except (json.JSONDecodeError, TypeError):
+            labels = []
+        cards.append({
+            "id": str(r["id"]),
+            "column": str(r["column_title"]),
+            "title": str(r["title"]),
+            "details": str(r["details"]),
+            "priority": r["priority"],
+            "due_date": r["due_date"],
+            "labels": labels,
+            "assignee": r["assignee_username"],
+        })
+    return {
+        "board": str(board_row["name"]) if board_row else "",
+        "exportedAt": __import__("datetime").datetime.utcnow().isoformat(),
+        "columns": columns,
+        "cards": cards,
     }
 
 

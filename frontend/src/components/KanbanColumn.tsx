@@ -15,7 +15,7 @@ type KanbanColumnProps = {
   isLastColumn?: boolean;
   onRename: (columnId: string, title: string) => void;
   onAddCard: (columnId: string, title: string, details: string) => void;
-  onDeleteCard: (columnId: string, cardId: string) => void;
+  onArchiveCard: (columnId: string, cardId: string) => void;
   onEditCard: (cardId: string, title: string, details: string, due_date: string | null, priority: Priority | null, labels: string[], assignee_id: string | null) => void;
   onMoveCard?: (cardId: string, direction: MoveDirection) => void;
 };
@@ -29,7 +29,7 @@ export const KanbanColumn = ({
   isLastColumn = false,
   onRename,
   onAddCard,
-  onDeleteCard,
+  onArchiveCard,
   onEditCard,
   onMoveCard,
 }: KanbanColumnProps) => {
@@ -106,7 +106,7 @@ export const KanbanColumn = ({
               card={card}
               boardId={boardId}
               assignableUsers={assignableUsers}
-              onDelete={(cardId) => onDeleteCard(column.id, cardId)}
+              onArchive={(cardId) => onArchiveCard(column.id, cardId)}
               onEdit={onEditCard}
               onMove={onMoveCard}
               canMove={{

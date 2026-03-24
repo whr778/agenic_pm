@@ -10,7 +10,7 @@ type KanbanCardProps = {
   card: Card;
   boardId: string;
   assignableUsers: AssignableUser[];
-  onDelete: (cardId: string) => void;
+  onArchive: (cardId: string) => void;
   onEdit: (
     cardId: string,
     title: string,
@@ -31,10 +31,39 @@ const PRIORITY_COLORS: Record<Priority, string> = {
   critical: "bg-red-100 text-red-700",
 };
 
-function isOverdue(due_date: string): boolean {
+type DueDateStatus = "overdue" | "due-today" | "due-soon" | "upcoming" | null;
+
+function getDueDateStatus(due_date: string | null | undefined): DueDateStatus {
+  if (!due_date) return null;
   const today = new Date().toISOString().slice(0, 10);
-  return due_date < today;
+  if (due_date < today) return "overdue";
+  if (due_date === today) return "due-today";
+  const soon = new Date();
+  soon.setDate(soon.getDate() + 3);
+  const soonStr = soon.toISOString().slice(0, 10);
+  if (due_date <= soonStr) return "due-soon";
+  return "upcoming";
 }
+
+function dueDateLabel(due_date: string, status: DueDateStatus): string {
+  if (status === "overdue") return `Overdue \u2014 ${due_date}`;
+  if (status === "due-today") return "Due today";
+  if (status === "due-soon") {
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    const target = new Date(`${due_date}T00:00:00`);
+    const days = Math.round((target.getTime() - now.getTime()) / 86400000);
+    return `Due in ${days} day${days === 1 ? "" : "s"}`;
+  }
+  return `Due ${due_date}`;
+}
+
+const DUE_DATE_CLASSES: Record<NonNullable<DueDateStatus>, string> = {
+  overdue: "text-red-600 font-semibold",
+  "due-today": "text-amber-600 font-semibold",
+  "due-soon": "text-yellow-600",
+  upcoming: "text-[var(--gray-text)]",
+};
 
 function initials(username: string): string {
   return username
@@ -48,7 +77,7 @@ export const KanbanCard = ({
   card,
   boardId,
   assignableUsers,
-  onDelete,
+  onArchive,
   onEdit,
   onMove,
   canMove,
@@ -169,7 +198,7 @@ export const KanbanCard = ({
     }
   };
 
-  const overdueClass = card.due_date && isOverdue(card.due_date) ? "text-red-600" : "text-[var(--gray-text)]";
+  const dueDateStatus = getDueDateStatus(card.due_date);
   const assignee = card.assignee_username ?? null;
 
   return (
@@ -322,9 +351,12 @@ export const KanbanCard = ({
                   {card.details}
                 </p>
               )}
-              {card.due_date && (
-                <p className={clsx("mt-2 text-xs font-medium", overdueClass)} data-testid={`card-due-${card.id}`}>
-                  Due {card.due_date}{card.due_date && isOverdue(card.due_date) ? " (overdue)" : ""}
+              {card.due_date && dueDateStatus && (
+                <p
+                  className={clsx("mt-2 text-xs", DUE_DATE_CLASSES[dueDateStatus])}
+                  data-testid={`card-due-${card.id}`}
+                >
+                  {dueDateLabel(card.due_date, dueDateStatus)}
                 </p>
               )}
             </div>
@@ -354,11 +386,11 @@ export const KanbanCard = ({
               </button>
               <button
                 type="button"
-                onClick={() => onDelete(card.id)}
+                onClick={() => onArchive(card.id)}
                 className="rounded-full border border-transparent px-3 py-1 text-xs font-semibold text-[var(--gray-text)] transition hover:border-[var(--stroke)] hover:text-[var(--navy-dark)]"
-                aria-label={`Delete ${card.title}`}
+                aria-label={`Archive ${card.title}`}
               >
-                Remove
+                Archive
               </button>
               {onMove && canMove && (
                 <div className="ml-1 flex items-center gap-1 border-l border-[var(--stroke)] pl-2">
