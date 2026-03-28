@@ -23,6 +23,21 @@ export type Card = {
   is_blocked?: boolean;
   sprint_id?: string | null;
   sprint_name?: string | null;
+  total_minutes?: number;
+};
+
+export type TimeLog = {
+  id: string;
+  minutes: number;
+  note: string;
+  loggedAt: string;
+  username: string;
+};
+
+export type TimeReport = {
+  total_minutes: number;
+  by_user: { user_id: string; username: string; total_minutes: number; entry_count: number }[];
+  by_card: { card_id: string; title: string; total_minutes: number; estimate_minutes: number | null }[];
 };
 
 export type CardDependency = {
@@ -83,6 +98,7 @@ export type Column = {
   id: string;
   key?: string;
   title: string;
+  wip_limit?: number | null;
   cardIds: string[];
 };
 

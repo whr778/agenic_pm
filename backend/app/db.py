@@ -139,6 +139,13 @@ def _migrate_boards_unique_constraint(connection: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_board_columns_add_wip_limit(connection: sqlite3.Connection) -> None:
+    """Add wip_limit column to board_columns table."""
+    cols = {row["name"] for row in connection.execute("PRAGMA table_info(board_columns)").fetchall()}
+    if "wip_limit" not in cols:
+        connection.execute("ALTER TABLE board_columns ADD COLUMN wip_limit INTEGER")
+
+
 def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
     """Add due_date, priority, labels, assignee_id, archived, estimate, and sprint_id columns to existing cards table."""
     columns = {
@@ -190,6 +197,7 @@ def init_db() -> None:
               key TEXT NOT NULL,
               title TEXT NOT NULL,
               position INTEGER NOT NULL,
+              wip_limit INTEGER,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
               updated_at TEXT NOT NULL DEFAULT (datetime('now')),
               FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE,
@@ -319,6 +327,22 @@ def init_db() -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_sprints_board_id ON sprints(board_id);
+
+            CREATE TABLE IF NOT EXISTS time_logs (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              card_id INTEGER NOT NULL,
+              board_id INTEGER NOT NULL,
+              user_id INTEGER NOT NULL,
+              minutes INTEGER NOT NULL CHECK (minutes > 0),
+              note TEXT NOT NULL DEFAULT '',
+              logged_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY (card_id) REFERENCES cards(id) ON DELETE CASCADE,
+              FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE,
+              FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_time_logs_card_id ON time_logs(card_id);
+            CREATE INDEX IF NOT EXISTS idx_time_logs_board_id ON time_logs(board_id);
             """
         )
 
@@ -326,6 +350,7 @@ def init_db() -> None:
         _migrate_boards_unique_constraint(connection)
         _migrate_sessions_to_user_id(connection)
         _migrate_cards_add_columns(connection)
+        _migrate_board_columns_add_wip_limit(connection)
 
         # Index on assignee_id must come after migration (column added by migration on old DBs)
         connection.execute(
@@ -639,7 +664,7 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
 
         column_rows = connection.execute(
             """
-            SELECT id, key, title, position
+            SELECT id, key, title, position, wip_limit
             FROM board_columns
             WHERE board_id = ?
             ORDER BY position ASC
@@ -656,7 +681,9 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
                    EXISTS(
                      SELECT 1 FROM card_dependencies cd
                      WHERE cd.blocked_id = c.id AND cd.board_id = c.board_id
-                   ) AS is_blocked
+                   ) AS is_blocked,
+                   (SELECT COALESCE(SUM(tl.minutes), 0)
+                    FROM time_logs tl WHERE tl.card_id = c.id) AS total_minutes
             FROM cards c
             LEFT JOIN users u ON c.assignee_id = u.id
             LEFT JOIN sprints s ON c.sprint_id = s.id
@@ -693,6 +720,7 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
                 "is_blocked": bool(card["is_blocked"]),
                 "sprint_id": str(card["sprint_id"]) if card["sprint_id"] else None,
                 "sprint_name": card["sprint_name"],
+                "total_minutes": int(card["total_minutes"]),
             }
 
         columns_payload = [
@@ -700,6 +728,7 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
                 "id": str(row["id"]),
                 "key": str(row["key"]),
                 "title": str(row["title"]),
+                "wip_limit": int(row["wip_limit"]) if row["wip_limit"] is not None else None,
                 "cardIds": card_ids_by_column.get(int(row["id"]), []),
             }
             for row in column_rows
@@ -726,6 +755,26 @@ def rename_column(user_id: int, board_id: int, column_id: int, title: str) -> di
         normalized = _rename_column_conn(connection, board_id, column_id, title)
         _log_activity_conn(connection, board_id, user_id, "rename_column", "column", column_id, normalized)
     return {"id": str(column_id), "title": normalized}
+
+
+def set_column_wip_limit(user_id: int, board_id: int, column_id: int, wip_limit: int | None) -> dict[str, object]:
+    if wip_limit is not None and wip_limit < 1:
+        raise ValidationError("WIP limit must be a positive integer")
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        row = connection.execute(
+            "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
+            (column_id, board_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("Column not found")
+        connection.execute(
+            "UPDATE board_columns SET wip_limit = ?, updated_at = datetime('now') WHERE id = ?",
+            (wip_limit, column_id),
+        )
+        detail = str(wip_limit) if wip_limit is not None else "removed"
+        _log_activity_conn(connection, board_id, user_id, "set_wip_limit", "column", column_id, detail)
+    return {"id": str(column_id), "wip_limit": wip_limit}
 
 
 def create_card(
@@ -1878,6 +1927,143 @@ def get_sprint_stats(user_id: int, board_id: int, sprint_id: int) -> dict[str, o
                 "total_estimate": int(r["total_estimate"]),
             }
             for r in col_rows
+        ],
+    }
+
+
+def log_time(user_id: int, board_id: int, card_id: int, minutes: int, note: str = "") -> dict[str, object]:
+    if minutes < 1:
+        raise ValidationError("minutes must be at least 1")
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        card = connection.execute(
+            "SELECT id, title FROM cards WHERE id = ? AND board_id = ? AND archived = 0",
+            (card_id, board_id),
+        ).fetchone()
+        if card is None:
+            raise NotFoundError("Card not found")
+        user = connection.execute("SELECT username FROM users WHERE id = ?", (user_id,)).fetchone()
+        cursor = connection.execute(
+            "INSERT INTO time_logs (card_id, board_id, user_id, minutes, note) VALUES (?, ?, ?, ?, ?)",
+            (card_id, board_id, user_id, minutes, note.strip()),
+        )
+        log_id = int(cursor.lastrowid or 0)
+        _log_activity_conn(connection, board_id, user_id, "log_time", "card", card_id,
+                           f"{minutes}m on '{str(card['title'])}'")
+    return {
+        "id": str(log_id),
+        "card_id": str(card_id),
+        "user_id": str(user_id),
+        "username": str(user["username"]) if user else "",
+        "minutes": minutes,
+        "note": note.strip(),
+    }
+
+
+def list_time_logs(user_id: int, board_id: int, card_id: int) -> list[dict[str, object]]:
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        card = connection.execute(
+            "SELECT id FROM cards WHERE id = ? AND board_id = ?",
+            (card_id, board_id),
+        ).fetchone()
+        if card is None:
+            raise NotFoundError("Card not found")
+        rows = connection.execute(
+            """
+            SELECT tl.id, tl.minutes, tl.note, tl.logged_at, u.username
+            FROM time_logs tl
+            JOIN users u ON tl.user_id = u.id
+            WHERE tl.card_id = ? AND tl.board_id = ?
+            ORDER BY tl.logged_at DESC
+            """,
+            (card_id, board_id),
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "minutes": int(row["minutes"]),
+            "note": str(row["note"]),
+            "loggedAt": str(row["logged_at"]),
+            "username": str(row["username"]),
+        }
+        for row in rows
+    ]
+
+
+def delete_time_log(user_id: int, board_id: int, card_id: int, log_id: int) -> None:
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        row = connection.execute(
+            "SELECT id, user_id FROM time_logs WHERE id = ? AND card_id = ? AND board_id = ?",
+            (log_id, card_id, board_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("Time log entry not found")
+        # Only the log owner or an admin may delete a time log
+        requester = connection.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+        if int(row["user_id"]) != user_id and (requester is None or str(requester["role"]) != "admin"):
+            raise ValidationError("You may only delete your own time log entries")
+        connection.execute("DELETE FROM time_logs WHERE id = ?", (log_id,))
+
+
+def get_time_report(user_id: int, board_id: int) -> dict[str, object]:
+    """Return time logged per user and per card for the board."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+
+        by_user = connection.execute(
+            """
+            SELECT u.id, u.username,
+                   COALESCE(SUM(tl.minutes), 0) AS total_minutes,
+                   COUNT(tl.id) AS entry_count
+            FROM users u
+            JOIN time_logs tl ON tl.user_id = u.id AND tl.board_id = ?
+            GROUP BY u.id, u.username
+            ORDER BY total_minutes DESC
+            """,
+            (board_id,),
+        ).fetchall()
+
+        by_card = connection.execute(
+            """
+            SELECT c.id, c.title,
+                   COALESCE(SUM(tl.minutes), 0) AS total_minutes,
+                   c.estimate
+            FROM cards c
+            JOIN time_logs tl ON tl.card_id = c.id AND tl.board_id = ?
+            WHERE c.archived = 0
+            GROUP BY c.id, c.title, c.estimate
+            ORDER BY total_minutes DESC
+            LIMIT 20
+            """,
+            (board_id,),
+        ).fetchall()
+
+        total_row = connection.execute(
+            "SELECT COALESCE(SUM(minutes), 0) AS total FROM time_logs WHERE board_id = ?",
+            (board_id,),
+        ).fetchone()
+
+    return {
+        "total_minutes": int(total_row["total"]) if total_row else 0,
+        "by_user": [
+            {
+                "user_id": str(r["id"]),
+                "username": str(r["username"]),
+                "total_minutes": int(r["total_minutes"]),
+                "entry_count": int(r["entry_count"]),
+            }
+            for r in by_user
+        ],
+        "by_card": [
+            {
+                "card_id": str(r["id"]),
+                "title": str(r["title"]),
+                "total_minutes": int(r["total_minutes"]),
+                "estimate_minutes": int(r["estimate"]) * 60 if r["estimate"] else None,
+            }
+            for r in by_card
         ],
     }
 

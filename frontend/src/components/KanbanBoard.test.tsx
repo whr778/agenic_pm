@@ -9,16 +9,16 @@ const boardPayload = {
   boardId: "1",
   name: "Main Board",
   columns: [
-    { id: "1", key: "backlog", title: "Backlog", cardIds: ["1", "2"] },
-    { id: "2", key: "todo", title: "To Do", cardIds: ["3"] },
-    { id: "3", key: "in_progress", title: "In Progress", cardIds: [] },
-    { id: "4", key: "review", title: "Review", cardIds: [] },
-    { id: "5", key: "done", title: "Done", cardIds: [] },
+    { id: "1", key: "backlog", title: "Backlog", wip_limit: null, cardIds: ["1", "2"] },
+    { id: "2", key: "todo", title: "To Do", wip_limit: null, cardIds: ["3"] },
+    { id: "3", key: "in_progress", title: "In Progress", wip_limit: null, cardIds: [] },
+    { id: "4", key: "review", title: "Review", wip_limit: null, cardIds: [] },
+    { id: "5", key: "done", title: "Done", wip_limit: null, cardIds: [] },
   ],
   cards: {
-    "1": { id: "1", title: "Card one", details: "A" },
-    "2": { id: "2", title: "Card two", details: "B" },
-    "3": { id: "3", title: "Card three", details: "C" },
+    "1": { id: "1", title: "Card one", details: "A", total_minutes: 0 },
+    "2": { id: "2", title: "Card two", details: "B", total_minutes: 90 },
+    "3": { id: "3", title: "Card three", details: "C", total_minutes: 0 },
   },
 };
 
@@ -120,7 +120,7 @@ beforeEach(() => {
       ]), { status: 200 });
     }
 
-    if (url.includes("/api/board") && method === "GET") {
+    if (url.includes("/api/board/") && method === "GET") {
       return new Response(JSON.stringify(boardState), { status: 200 });
     }
 
@@ -146,7 +146,7 @@ beforeEach(() => {
       );
     }
 
-    if (url.includes("/api/board") && method === "PUT") {
+    if (url.includes("/api/board/") && method === "PUT") {
       return new Response(JSON.stringify({ boardId: "1", name: "Renamed" }), {
         status: 200,
       });
@@ -179,6 +179,41 @@ beforeEach(() => {
       return new Response(JSON.stringify({ id: "1", columnId: "2", position: "0" }), {
         status: 200,
       });
+    }
+
+    if (url.includes("/wip-limit") && method === "PUT") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { wip_limit?: number | null };
+      return new Response(JSON.stringify({ id: "1", wip_limit: body.wip_limit ?? null }), { status: 200 });
+    }
+
+    if (url.includes("/time-logs") && method === "GET") {
+      return new Response(JSON.stringify([
+        { id: "t1", minutes: 30, note: "work", loggedAt: "2026-01-01T10:00:00", username: "user" },
+      ]), { status: 200 });
+    }
+
+    if (url.includes("/time-logs") && method === "POST") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { minutes?: number; note?: string };
+      return new Response(
+        JSON.stringify({ id: "t2", minutes: body.minutes ?? 30, note: body.note ?? "", loggedAt: "2026-01-01T11:00:00", username: "user" }),
+        { status: 200 }
+      );
+    }
+
+    if (url.match(/\/time-logs\/\w+$/) && method === "DELETE") {
+      return new Response(JSON.stringify({ status: "deleted" }), { status: 200 });
+    }
+
+    if (url.includes("/time-report") && method === "GET") {
+      return new Response(JSON.stringify({
+        total_minutes: 90,
+        by_user: [{ user_id: "1", username: "user", total_minutes: 90, entry_count: 1 }],
+        by_card: [{ card_id: "2", title: "Card two", total_minutes: 90, estimate_minutes: null }],
+      }), { status: 200 });
+    }
+
+    if (url.includes("/sprints") && method === "GET") {
+      return new Response(JSON.stringify([]), { status: 200 });
     }
 
     return new Response(JSON.stringify({ detail: "Not found" }), { status: 404 });
@@ -1209,6 +1244,155 @@ describe("KanbanBoard", () => {
     await userEvent.keyboard("{Escape}");
     await waitFor(() => {
       expect(screen.queryByTestId("shortcuts-overlay")).not.toBeInTheDocument();
+    });
+  });
+});
+
+describe("Time tracking UI", () => {
+  it("shows time badge on cards with logged time", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    // Card 2 has total_minutes=90
+    expect(screen.getByTestId("card-time-2")).toBeInTheDocument();
+    expect(screen.getByTestId("card-time-2")).toHaveTextContent("90m logged");
+  });
+
+  it("does not show time badge on cards with zero minutes", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    expect(screen.queryByTestId("card-time-1")).not.toBeInTheDocument();
+  });
+
+  it("opens time log panel when Time button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("time-toggle-1"));
+    expect(await screen.findByTestId("time-logs-1")).toBeInTheDocument();
+  });
+
+  it("displays loaded time logs in the panel", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("time-toggle-1"));
+    expect(await screen.findByText("30m")).toBeInTheDocument();
+    expect(screen.getByText(/work/)).toBeInTheDocument();
+  });
+
+  it("logs time via the log form", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("time-toggle-1"));
+    await screen.findByTestId("time-logs-1");
+
+    const minutesInput = screen.getByTestId("log-minutes-1");
+    await userEvent.clear(minutesInput);
+    await userEvent.type(minutesInput, "45");
+    await userEvent.click(screen.getByTestId("log-time-btn-1"));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/time-logs"),
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+  });
+
+  it("opens time report panel when Time report is toggled", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("time-report-toggle"));
+    const panel = await screen.findByTestId("time-report-panel");
+    expect(panel).toBeInTheDocument();
+    expect(within(panel).getByText("user")).toBeInTheDocument();
+    expect(within(panel).getByText("Card two")).toBeInTheDocument();
+  });
+});
+
+describe("WIP limits UI", () => {
+  it("shows + WIP button in each column header", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    expect(screen.getAllByTestId(/wip-btn-/)).toHaveLength(5);
+  });
+
+  it("shows WIP limit count when set", async () => {
+    const payloadWithWip = structuredClone(boardPayload);
+    payloadWithWip.columns[0].wip_limit = 3;
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input, _init) => {
+      const url = String(input);
+      if (url.includes("/api/board")) return new Response(JSON.stringify(payloadWithWip), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(mockStats), { status: 200 });
+      if (url.includes("/api/users")) return new Response(JSON.stringify(mockUsers), { status: 200 });
+      if (url.includes("/sprints")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    expect(screen.getByText("2/3 cards")).toBeInTheDocument();
+  });
+
+  it("calls WIP limit API when limit is committed", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("wip-btn-1"));
+    const wipInput = screen.getByTestId("wip-input-1");
+    await userEvent.type(wipInput, "5");
+    await userEvent.keyboard("{Enter}");
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/wip-limit"),
+        expect.objectContaining({ method: "PUT" })
+      );
+    });
+  });
+});
+
+describe("Swimlanes", () => {
+  it("shows swimlane grouping select", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    expect(screen.getByTestId("swimlane-select")).toBeInTheDocument();
+  });
+
+  it("defaults to no swimlanes", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    expect(screen.getByTestId("swimlane-select")).toHaveValue("none");
+  });
+
+  it("renders swimlane headers when priority grouping is selected", async () => {
+    // Board with cards with different priorities
+    const payloadWithPriorities = structuredClone(boardPayload);
+    payloadWithPriorities.cards["1"] = { ...payloadWithPriorities.cards["1"], priority: "high", total_minutes: 0 };
+    payloadWithPriorities.cards["2"] = { ...payloadWithPriorities.cards["2"], priority: "low", total_minutes: 0 };
+
+    vi.spyOn(global, "fetch").mockImplementation(async (input, _init) => {
+      const url = String(input);
+      if (url.includes("/api/board")) return new Response(JSON.stringify(payloadWithPriorities), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(mockStats), { status: 200 });
+      if (url.includes("/api/users")) return new Response(JSON.stringify(mockUsers), { status: 200 });
+      if (url.includes("/sprints")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.selectOptions(screen.getByTestId("swimlane-select"), "priority");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("swimlane-1-high")).toBeInTheDocument();
+      expect(screen.getByTestId("swimlane-1-low")).toBeInTheDocument();
     });
   });
 });

@@ -2,7 +2,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import clsx from "clsx";
 import { useEffect, useRef, useState } from "react";
-import type { AssignableUser, Card, CardDependency, ChecklistItem, Comment, Priority, Sprint } from "@/lib/kanban";
+import type { AssignableUser, Card, CardDependency, ChecklistItem, Comment, Priority, Sprint, TimeLog } from "@/lib/kanban";
 
 export type MoveDirection = "up" | "down" | "left" | "right";
 
@@ -117,6 +117,15 @@ export const KanbanCard = ({
   const [depPickCardId, setDepPickCardId] = useState("");
   const [depError, setDepError] = useState<string | null>(null);
 
+  // Time tracking state
+  const [showTimeLogs, setShowTimeLogs] = useState(false);
+  const [timeLogs, setTimeLogs] = useState<TimeLog[]>([]);
+  const [timeLogsLoaded, setTimeLogsLoaded] = useState(false);
+  const [logMinutes, setLogMinutes] = useState("");
+  const [logNote, setLogNote] = useState("");
+  const [timeLogError, setTimeLogError] = useState<string | null>(null);
+  const [timeLogSubmitting, setTimeLogSubmitting] = useState(false);
+
   // Comments state
   const [showComments, setShowComments] = useState(false);
   const [comments, setComments] = useState<Comment[]>([]);
@@ -166,6 +175,18 @@ export const KanbanCard = ({
         });
     }
   }, [showChecklist, checklistLoaded, boardId, card.id]);
+
+  useEffect(() => {
+    if (showTimeLogs && !timeLogsLoaded) {
+      void fetch(`/api/boards/${boardId}/cards/${card.id}/time-logs`, { credentials: "include" })
+        .then((r) => r.json())
+        .then((data: TimeLog[]) => {
+          setTimeLogs(data);
+          setTimeLogsLoaded(true);
+        })
+        .catch(() => { setTimeLogsLoaded(true); });
+    }
+  }, [showTimeLogs, timeLogsLoaded, boardId, card.id]);
 
   useEffect(() => {
     if (showComments && !commentsLoaded) {
@@ -227,6 +248,48 @@ export const KanbanCard = ({
     setDraftSprintId(card.sprint_id ?? "");
     setTitleError(false);
     setIsEditing(false);
+  };
+
+  const handleLogTime = async () => {
+    const mins = parseInt(logMinutes, 10);
+    if (!logMinutes.trim() || isNaN(mins) || mins < 1 || mins > 480) {
+      setTimeLogError("Enter a duration between 1 and 480 minutes");
+      return;
+    }
+    setTimeLogError(null);
+    setTimeLogSubmitting(true);
+    try {
+      const response = await fetch(`/api/boards/${boardId}/cards/${card.id}/time-logs`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ minutes: mins, note: logNote.trim() }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json()) as { detail?: string };
+        throw new Error(payload.detail ?? "Failed to log time");
+      }
+      const newLog = (await response.json()) as TimeLog;
+      setTimeLogs((prev) => [newLog, ...prev]);
+      setLogMinutes("");
+      setLogNote("");
+    } catch (err) {
+      setTimeLogError(err instanceof Error ? err.message : "Failed to log time");
+    } finally {
+      setTimeLogSubmitting(false);
+    }
+  };
+
+  const handleDeleteTimeLog = async (logId: string) => {
+    try {
+      await fetch(`/api/boards/${boardId}/cards/${card.id}/time-logs/${logId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      setTimeLogs((prev) => prev.filter((l) => l.id !== logId));
+    } catch {
+      // ignore
+    }
   };
 
   const handleAddComment = async () => {
@@ -567,6 +630,14 @@ export const KanbanCard = ({
                     {card.sprint_name}
                   </span>
                 )}
+                {(card.total_minutes ?? 0) > 0 && (
+                  <span
+                    className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-semibold text-green-700"
+                    data-testid={`card-time-${card.id}`}
+                  >
+                    {card.total_minutes}m logged
+                  </span>
+                )}
                 {checklist.length > 0 && !showChecklist && (
                   <span
                     className="rounded-full bg-[var(--gray-text)]/10 px-2 py-0.5 text-xs font-medium text-[var(--gray-text)]"
@@ -618,6 +689,15 @@ export const KanbanCard = ({
                     {comments.length}
                   </span>
                 )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowTimeLogs((v) => !v)}
+                className="rounded-full border border-transparent px-3 py-1 text-xs font-semibold text-[var(--gray-text)] transition hover:border-[var(--stroke)] hover:text-[var(--navy-dark)]"
+                aria-label={`${showTimeLogs ? "Hide" : "Log"} time for ${card.title}`}
+                data-testid={`time-toggle-${card.id}`}
+              >
+                {showTimeLogs ? "Hide time" : "Time"}
               </button>
               <button
                 type="button"
@@ -788,6 +868,67 @@ export const KanbanCard = ({
                     className="rounded-lg bg-[var(--primary-blue)] px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
                   >
                     Add
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {showTimeLogs && (
+              <div className="mt-2 space-y-2 border-t border-[var(--stroke)] pt-2" data-testid={`time-logs-${card.id}`}>
+                <p className="text-xs font-semibold text-[var(--gray-text)]">Time logged</p>
+                {timeLogs.length === 0 && timeLogsLoaded ? (
+                  <p className="text-xs text-[var(--gray-text)]">No time logged yet.</p>
+                ) : (
+                  timeLogs.map((lg) => (
+                    <div key={lg.id} className="flex items-center justify-between gap-2 rounded-lg bg-[var(--surface)] px-2 py-1.5">
+                      <div className="min-w-0">
+                        <span className="text-xs font-semibold text-green-700">{lg.minutes}m</span>
+                        <span className="ml-1 text-xs text-[var(--gray-text)]">by {lg.username}</span>
+                        {lg.note && <span className="ml-1 text-xs text-[var(--navy-dark)]">&mdash; {lg.note}</span>}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteTimeLog(lg.id)}
+                        className="text-[10px] text-[var(--gray-text)] hover:text-red-500"
+                        aria-label={`Delete time log entry`}
+                      >
+                        x
+                      </button>
+                    </div>
+                  ))
+                )}
+                {timeLogError && (
+                  <p className="text-xs text-red-600" role="alert">{timeLogError}</p>
+                )}
+                <div className="flex gap-1">
+                  <input
+                    value={logMinutes}
+                    onChange={(e) => setLogMinutes(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") void handleLogTime(); }}
+                    placeholder="Minutes"
+                    type="number"
+                    min={1}
+                    max={480}
+                    className="w-20 rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs outline-none"
+                    aria-label="Minutes to log"
+                    data-testid={`log-minutes-${card.id}`}
+                  />
+                  <input
+                    value={logNote}
+                    onChange={(e) => setLogNote(e.target.value)}
+                    placeholder="Note (optional)"
+                    maxLength={1000}
+                    className="flex-1 rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs outline-none"
+                    aria-label="Time log note"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleLogTime()}
+                    disabled={timeLogSubmitting || !logMinutes.trim()}
+                    className="rounded-lg bg-green-600 px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                    data-testid={`log-time-btn-${card.id}`}
+                  >
+                    Log
                   </button>
                 </div>
               </div>

@@ -2355,3 +2355,458 @@ def test_delete_completed_sprint(client: TestClient) -> None:
     client.post(f"/api/boards/{board_id}/sprints/{sid}/complete")
     response = client.delete(f"/api/boards/{board_id}/sprints/{sid}")
     assert response.status_code == 200
+
+
+# ── WIP limit tests ───────────────────────────────────────────────────────────
+
+def _get_first_col_id(client: TestClient, board_id: str) -> str:
+    return client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+
+def test_set_wip_limit(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    response = client.put(
+        f"/api/boards/{board_id}/columns/{col_id}/wip-limit",
+        json={"wip_limit": 3},
+    )
+    assert response.status_code == 200
+    assert response.json()["wip_limit"] == 3
+
+
+def test_wip_limit_reflected_in_board_payload(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    client.put(f"/api/boards/{board_id}/columns/{col_id}/wip-limit", json={"wip_limit": 5})
+    board = client.get(f"/api/board/{board_id}").json()
+    col = next(c for c in board["columns"] if c["id"] == col_id)
+    assert col["wip_limit"] == 5
+
+
+def test_clear_wip_limit(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    client.put(f"/api/boards/{board_id}/columns/{col_id}/wip-limit", json={"wip_limit": 3})
+    response = client.put(
+        f"/api/boards/{board_id}/columns/{col_id}/wip-limit",
+        json={"wip_limit": None},
+    )
+    assert response.status_code == 200
+    assert response.json()["wip_limit"] is None
+    board = client.get(f"/api/board/{board_id}").json()
+    col = next(c for c in board["columns"] if c["id"] == col_id)
+    assert col["wip_limit"] is None
+
+
+def test_wip_limit_zero_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    response = client.put(
+        f"/api/boards/{board_id}/columns/{col_id}/wip-limit",
+        json={"wip_limit": 0},
+    )
+    assert response.status_code == 422  # Pydantic validation (ge=1)
+
+
+def test_wip_limit_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.put(
+        f"/api/boards/{board_id}/columns/99999/wip-limit",
+        json={"wip_limit": 3},
+    )
+    assert response.status_code == 404
+
+
+def test_wip_limit_requires_auth(client: TestClient) -> None:
+    response = client.put("/api/boards/1/columns/1/wip-limit", json={"wip_limit": 3})
+    assert response.status_code == 401
+
+
+def test_wip_limit_activity_logged(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    client.put(f"/api/boards/{board_id}/columns/{col_id}/wip-limit", json={"wip_limit": 4})
+    log = client.get(f"/api/boards/{board_id}/activity").json()
+    assert any(e["action"] == "set_wip_limit" for e in log)
+
+
+def test_board_columns_default_no_wip_limit(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    for col in board["columns"]:
+        assert col["wip_limit"] is None
+
+
+# ── Time log tests ─────────────────────────────────────────────────────────────
+
+def _create_card_simple(client: TestClient, board_id: str, title: str = "Test Card") -> str:
+    col_id = _get_first_col_id(client, board_id)
+    return client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": title, "details": ""},
+    ).json()["id"]
+
+
+def test_log_time(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    response = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/time-logs",
+        json={"minutes": 60, "note": "Implemented feature"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["minutes"] == 60
+    assert data["note"] == "Implemented feature"
+
+
+def test_log_time_minimal(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    response = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/time-logs",
+        json={"minutes": 30},
+    )
+    assert response.status_code == 200
+    assert response.json()["minutes"] == 30
+
+
+def test_log_time_zero_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    response = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/time-logs",
+        json={"minutes": 0},
+    )
+    assert response.status_code == 422  # Pydantic validation
+
+
+def test_log_time_over_limit_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    response = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/time-logs",
+        json={"minutes": 481},
+    )
+    assert response.status_code == 422  # Pydantic validation (le=480)
+
+
+def test_list_time_logs_empty(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    response = client.get(f"/api/boards/{board_id}/cards/{card_id}/time-logs")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_list_time_logs_populated(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/time-logs", json={"minutes": 30, "note": "A"})
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/time-logs", json={"minutes": 45, "note": "B"})
+    logs = client.get(f"/api/boards/{board_id}/cards/{card_id}/time-logs").json()
+    assert len(logs) == 2
+    assert {lg["note"] for lg in logs} == {"A", "B"}
+
+
+def test_total_minutes_in_board_payload(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/time-logs", json={"minutes": 30})
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/time-logs", json={"minutes": 45})
+    board = client.get(f"/api/board/{board_id}").json()
+    assert board["cards"][str(card_id)]["total_minutes"] == 75
+
+
+def test_delete_time_log(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    log_id = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/time-logs",
+        json={"minutes": 60},
+    ).json()["id"]
+    response = client.delete(f"/api/boards/{board_id}/cards/{card_id}/time-logs/{log_id}")
+    assert response.status_code == 200
+    assert client.get(f"/api/boards/{board_id}/cards/{card_id}/time-logs").json() == []
+
+
+def test_delete_time_log_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    response = client.delete(f"/api/boards/{board_id}/cards/{card_id}/time-logs/99999")
+    assert response.status_code == 404
+
+
+def test_time_report_empty(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.get(f"/api/boards/{board_id}/time-report")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_minutes"] == 0
+    assert data["by_user"] == []
+    assert data["by_card"] == []
+
+
+def test_time_report_populated(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id, "Timed Card")
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/time-logs", json={"minutes": 90, "note": ""})
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/time-logs", json={"minutes": 30, "note": ""})
+    report = client.get(f"/api/boards/{board_id}/time-report").json()
+    assert report["total_minutes"] == 120
+    assert len(report["by_user"]) == 1
+    assert report["by_user"][0]["total_minutes"] == 120
+    assert len(report["by_card"]) == 1
+    assert report["by_card"][0]["total_minutes"] == 120
+    assert report["by_card"][0]["title"] == "Timed Card"
+
+
+def test_time_log_requires_auth(client: TestClient) -> None:
+    response = client.post("/api/boards/1/cards/1/time-logs", json={"minutes": 30})
+    assert response.status_code == 401
+
+
+def test_time_report_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/boards/1/time-report")
+    assert response.status_code == 401
+
+
+def test_time_log_activity_logged(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/time-logs", json={"minutes": 45})
+    log = client.get(f"/api/boards/{board_id}/activity").json()
+    assert any(e["action"] == "log_time" for e in log)
+
+
+def test_board_cards_have_total_minutes_zero_by_default(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    for card in board["cards"].values():
+        assert card["total_minutes"] == 0
+
+
+# ── OpenRouter unit tests ─────────────────────────────────────────────────────
+# These test openrouter.py logic directly using mocked httpx.
+
+import importlib
+from unittest.mock import MagicMock, patch
+
+import pytest
+from app import openrouter as or_module
+
+
+def test_build_chat_payload_structure() -> None:
+    payload = or_module.build_chat_payload("hello")
+    assert payload["model"] == or_module.DEFAULT_MODEL
+    assert payload["messages"] == [{"role": "user", "content": "hello"}]
+
+
+def test_build_chat_payload_custom_model() -> None:
+    payload = or_module.build_chat_payload("hi", model="custom/model")
+    assert payload["model"] == "custom/model"
+
+
+def test_extract_message_text_string_content() -> None:
+    data = {"choices": [{"message": {"content": "hello world"}}]}
+    assert or_module._extract_message_text(data) == "hello world"
+
+
+def test_extract_message_text_list_content() -> None:
+    data = {"choices": [{"message": {"content": [{"text": "part1"}, {"text": "part2"}]}}]}
+    assert or_module._extract_message_text(data) == "part1\npart2"
+
+
+def test_extract_message_text_empty_choices_raises() -> None:
+    with pytest.raises(or_module.OpenRouterError) as exc_info:
+        or_module._extract_message_text({"choices": []})
+    assert exc_info.value.status_code == 502
+
+
+def test_extract_message_text_missing_choices_raises() -> None:
+    with pytest.raises(or_module.OpenRouterError):
+        or_module._extract_message_text({})
+
+
+def test_extract_message_text_malformed_choice_raises() -> None:
+    with pytest.raises(or_module.OpenRouterError):
+        or_module._extract_message_text({"choices": ["not_a_dict"]})
+
+
+def test_extract_message_text_missing_message_raises() -> None:
+    with pytest.raises(or_module.OpenRouterError):
+        or_module._extract_message_text({"choices": [{"no_message": True}]})
+
+
+def test_extract_message_text_missing_content_raises() -> None:
+    with pytest.raises(or_module.OpenRouterError):
+        or_module._extract_message_text({"choices": [{"message": {}}]})
+
+
+def test_chat_completion_no_api_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(or_module.OpenRouterError) as exc_info:
+        or_module.chat_completion("test")
+    assert exc_info.value.status_code == 503
+
+
+def test_chat_completion_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = {
+        "model": "test/model",
+        "choices": [{"message": {"content": "4"}}],
+    }
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+        result = or_module.chat_completion("2+2")
+    assert result["response"] == "4"
+    assert result["model"] == "test/model"
+
+
+def test_chat_completion_timeout_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.side_effect = httpx.TimeoutException("timeout")
+        mock_client_cls.return_value = mock_client
+        with pytest.raises(or_module.OpenRouterError) as exc_info:
+            or_module.chat_completion("test")
+    assert exc_info.value.status_code == 504
+
+
+def test_chat_completion_request_error_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import httpx
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.side_effect = httpx.RequestError("network error")
+        mock_client_cls.return_value = mock_client
+        with pytest.raises(or_module.OpenRouterError) as exc_info:
+            or_module.chat_completion("test")
+    assert exc_info.value.status_code == 502
+
+
+def test_chat_completion_4xx_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    mock_response = MagicMock()
+    mock_response.status_code = 401
+    mock_response.json.return_value = {"error": {"message": "Invalid API key"}}
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+        with pytest.raises(or_module.OpenRouterError) as exc_info:
+            or_module.chat_completion("test")
+    assert exc_info.value.status_code == 502
+    assert "Invalid API key" in str(exc_info.value)
+
+
+def test_chat_completion_invalid_json_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.side_effect = ValueError("not json")
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+        with pytest.raises(or_module.OpenRouterError) as exc_info:
+            or_module.chat_completion("test")
+    assert exc_info.value.status_code == 502
+
+
+def test_chat_completion_non_dict_body_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    mock_response = MagicMock()
+    mock_response.status_code = 200
+    mock_response.json.return_value = ["not", "a", "dict"]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_response
+        mock_client_cls.return_value = mock_client
+        with pytest.raises(or_module.OpenRouterError) as exc_info:
+            or_module.chat_completion("test")
+    assert exc_info.value.status_code == 502
+
+
+# ── Time log error-branch tests ──────────────────────────────────────────────
+
+def test_list_time_logs_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.get(f"/api/boards/{board_id}/cards/99999/time-logs")
+    assert response.status_code == 404
+
+
+def test_log_time_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.post(
+        f"/api/boards/{board_id}/cards/99999/time-logs",
+        json={"minutes": 30},
+    )
+    assert response.status_code == 404
+
+
+def test_delete_time_log_forbidden_other_user(client: TestClient) -> None:
+    """User can only delete their own time logs (unless admin)."""
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    log_id = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/time-logs",
+        json={"minutes": 30},
+    ).json()["id"]
+
+    # Create a second non-admin user and try to delete
+    admin_client = client
+    admin_client.post("/api/admin/users", json={"username": "other_user_tl", "password": "pass", "role": "user"})
+
+    second_client = TestClient(admin_client.app)
+    second_client.post("/api/auth/login", json={"username": "other_user_tl", "password": "pass"})
+
+    resp = second_client.delete(f"/api/boards/{board_id}/cards/{card_id}/time-logs/{log_id}")
+    assert resp.status_code in (401, 403, 404)  # Not authorized or board not accessible
+
+
+def test_time_report_board_not_found(client: TestClient) -> None:
+    login(client)
+    response = client.get("/api/boards/99999/time-report")
+    assert response.status_code == 404

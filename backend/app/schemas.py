@@ -112,3 +112,12 @@ class UpdateSprintPayload(BaseModel):
 
 class AssignCardSprintPayload(BaseModel):
     sprint_id: str | None = Field(default=None, max_length=20)
+
+
+class SetWipLimitPayload(BaseModel):
+    wip_limit: int | None = Field(default=None, ge=1)
+
+
+class LogTimePayload(BaseModel):
+    minutes: int = Field(ge=1, le=480)  # 1 min to 8 hours per log entry
+    note: str = Field(default="", max_length=1000)

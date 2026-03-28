@@ -26,6 +26,7 @@ import {
   type Column,
   type Priority,
   type Sprint,
+  type TimeReport,
 } from "@/lib/kanban";
 import type { MoveDirection } from "@/components/KanbanCard";
 
@@ -62,6 +63,14 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
   const [showActivity, setShowActivity] = useState(false);
   const [activityLog, setActivityLog] = useState<ActivityEntry[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
+
+  // Time report panel
+  const [showTimeReport, setShowTimeReport] = useState(false);
+  const [timeReport, setTimeReport] = useState<TimeReport | null>(null);
+  const [timeReportLoading, setTimeReportLoading] = useState(false);
+
+  // Swimlane grouping
+  const [swimlaneGroup, setSwimlaneGroup] = useState<"none" | "priority" | "assignee">("none");
 
   // Sprint management
   const [sprints, setSprints] = useState<Sprint[]>([]);
@@ -481,6 +490,30 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     }
   };
 
+  const handleSetWipLimit = async (columnId: string, wip_limit: number | null) => {
+    try {
+      await apiRef.current(`/api/boards/${boardId}/columns/${columnId}/wip-limit`, {
+        method: "PUT",
+        body: JSON.stringify({ wip_limit }),
+      });
+      await loadBoard();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to set WIP limit");
+    }
+  };
+
+  const loadTimeReport = useCallback(async () => {
+    setTimeReportLoading(true);
+    try {
+      const response = await apiRef.current(`/api/boards/${boardId}/time-report`);
+      setTimeReport((await response.json()) as TimeReport);
+    } catch {
+      setTimeReport(null);
+    } finally {
+      setTimeReportLoading(false);
+    }
+  }, [boardId]);
+
   const handleMoveCard = async (cardId: string, direction: MoveDirection) => {
     if (!board) return;
     const colIndex = board.columns.findIndex((c) => c.cardIds.includes(cardId));
@@ -713,6 +746,26 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
             </button>
             <button
               type="button"
+              onClick={() => { setShowTimeReport((v) => { if (!v) void loadTimeReport(); return !v; }); }}
+              className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${showTimeReport ? "border-[var(--accent-yellow)] bg-[var(--accent-yellow)]/10 text-[var(--navy-dark)]" : "border-[var(--stroke)] text-[var(--gray-text)] hover:text-[var(--navy-dark)]"}`}
+              aria-label="Toggle time report"
+              data-testid="time-report-toggle"
+            >
+              Time report
+            </button>
+            <select
+              value={swimlaneGroup}
+              onChange={(e) => setSwimlaneGroup(e.target.value as "none" | "priority" | "assignee")}
+              className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none"
+              aria-label="Swimlane grouping"
+              data-testid="swimlane-select"
+            >
+              <option value="none">No swimlanes</option>
+              <option value="priority">By priority</option>
+              <option value="assignee">By assignee</option>
+            </select>
+            <button
+              type="button"
               onClick={() => setShowShortcuts(true)}
               className="ml-auto rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm font-semibold text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
               aria-label="Show keyboard shortcuts"
@@ -817,10 +870,12 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                   isFirstColumn={colIdx === 0}
                   isLastColumn={colIdx === safeBoard.columns.length - 1}
                   onRename={handleRenameColumn}
+                  onSetWipLimit={handleSetWipLimit}
                   onAddCard={handleAddCard}
                   onArchiveCard={handleArchiveCard}
                   onEditCard={handleEditCard}
                   onMoveCard={handleMoveCard}
+                  swimlaneGroup={swimlaneGroup}
                 />
               ))}
             </section>
@@ -1097,6 +1152,59 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                     </li>
                   ))}
                 </ul>
+              )}
+            </section>
+          )}
+
+          {/* Time report panel */}
+          {showTimeReport && (
+            <section
+              className="rounded-[28px] border border-[var(--stroke)] bg-white/90 p-6 shadow-[var(--shadow)]"
+              data-testid="time-report-panel"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="font-display text-xl font-semibold text-[var(--navy-dark)]">Time Report</h2>
+                <button
+                  type="button"
+                  onClick={() => void loadTimeReport()}
+                  className="text-xs text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+                  aria-label="Refresh time report"
+                >
+                  Refresh
+                </button>
+              </div>
+              {timeReportLoading ? (
+                <p className="mt-4 text-sm text-[var(--gray-text)]">Loading...</p>
+              ) : !timeReport || timeReport.total_minutes === 0 ? (
+                <p className="mt-4 text-sm text-[var(--gray-text)]">No time logged yet.</p>
+              ) : (
+                <div className="mt-4 grid gap-6 sm:grid-cols-2">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[var(--gray-text)]">By team member</p>
+                    <ul className="mt-2 space-y-1">
+                      {timeReport.by_user.map((u) => (
+                        <li key={u.user_id} className="flex items-center justify-between rounded-xl bg-[var(--surface)] px-3 py-2">
+                          <span className="text-sm font-semibold text-[var(--navy-dark)]">{u.username}</span>
+                          <span className="text-sm text-green-700">{u.total_minutes}m ({u.entry_count} entries)</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-[var(--gray-text)]">By card (top 20)</p>
+                    <ul className="mt-2 space-y-1">
+                      {timeReport.by_card.map((c) => (
+                        <li key={c.card_id} className="flex items-center justify-between rounded-xl bg-[var(--surface)] px-3 py-2">
+                          <span className="max-w-[60%] truncate text-sm text-[var(--navy-dark)]">{c.title}</span>
+                          <span className="text-sm text-green-700">{c.total_minutes}m{c.estimate_minutes != null ? ` / ${c.estimate_minutes}m est` : ""}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <p className="col-span-2 text-sm font-semibold text-[var(--navy-dark)]">
+                    Total: {timeReport.total_minutes} minutes
+                  </p>
+                </div>
               )}
             </section>
           )}
