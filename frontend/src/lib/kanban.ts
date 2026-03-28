@@ -9,6 +9,14 @@ export type Card = {
   labels?: string[];
   assignee_id?: string | null;
   assignee_username?: string | null;
+  estimate?: number | null;
+};
+
+export type ChecklistItem = {
+  id: string;
+  text: string;
+  checked: boolean;
+  position: number;
 };
 
 export type AssignableUser = {
@@ -18,8 +26,9 @@ export type AssignableUser = {
 
 export type BoardStats = {
   total_cards: number;
+  total_estimate: number;
   overdue_count: number;
-  cards_per_column: { id: string; title: string; count: number }[];
+  cards_per_column: { id: string; title: string; count: number; total_estimate: number }[];
   cards_by_priority: Record<string, number>;
 };
 

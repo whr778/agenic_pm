@@ -140,7 +140,7 @@ def _migrate_boards_unique_constraint(connection: sqlite3.Connection) -> None:
 
 
 def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
-    """Add due_date, priority, labels, assignee_id, and archived columns to existing cards table."""
+    """Add due_date, priority, labels, assignee_id, archived, and estimate columns to existing cards table."""
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(cards)").fetchall()
@@ -155,6 +155,8 @@ def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE cards ADD COLUMN assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL")
     if "archived" not in columns:
         connection.execute("ALTER TABLE cards ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
+    if "estimate" not in columns:
+        connection.execute("ALTER TABLE cards ADD COLUMN estimate INTEGER")
 
 
 def init_db() -> None:
@@ -205,6 +207,7 @@ def init_db() -> None:
               labels TEXT NOT NULL DEFAULT '[]',
               assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
               archived INTEGER NOT NULL DEFAULT 0,
+              estimate INTEGER,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
               updated_at TEXT NOT NULL DEFAULT (datetime('now')),
               FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE,
@@ -268,6 +271,20 @@ def init_db() -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_card_comments_card_id ON card_comments(card_id);
+
+            CREATE TABLE IF NOT EXISTS card_checklists (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              card_id INTEGER NOT NULL,
+              board_id INTEGER NOT NULL,
+              text TEXT NOT NULL,
+              checked INTEGER NOT NULL DEFAULT 0,
+              position INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY (card_id) REFERENCES cards(id) ON DELETE CASCADE,
+              FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_card_checklists_card_id ON card_checklists(card_id);
             """
         )
 
@@ -599,7 +616,7 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
         card_rows = connection.execute(
             """
             SELECT c.id, c.column_id, c.title, c.details, c.position,
-                   c.due_date, c.priority, c.labels, c.assignee_id,
+                   c.due_date, c.priority, c.labels, c.assignee_id, c.estimate,
                    u.username AS assignee_username
             FROM cards c
             LEFT JOIN users u ON c.assignee_id = u.id
@@ -632,6 +649,7 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
                 "labels": labels,
                 "assignee_id": str(card["assignee_id"]) if card["assignee_id"] else None,
                 "assignee_username": card["assignee_username"],
+                "estimate": int(card["estimate"]) if card["estimate"] is not None else None,
             }
 
         columns_payload = [
@@ -678,12 +696,14 @@ def create_card(
     priority: str | None = None,
     labels: list[str] | None = None,
     assignee_id: int | None = None,
+    estimate: int | None = None,
 ) -> dict[str, object]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
         card_id, norm_title, norm_details = _create_card_conn(
             connection, board_id, column_id, title, details,
-            due_date=due_date, priority=priority, labels=labels, assignee_id=assignee_id,
+            due_date=due_date, priority=priority, labels=labels,
+            assignee_id=assignee_id, estimate=estimate,
         )
         _log_activity_conn(connection, board_id, user_id, "create_card", "card", card_id, norm_title)
     return {
@@ -695,6 +715,7 @@ def create_card(
         "priority": priority,
         "labels": labels or [],
         "assignee_id": str(assignee_id) if assignee_id else None,
+        "estimate": estimate,
     }
 
 
@@ -709,12 +730,14 @@ def update_card(
     priority: str | None = None,
     labels: list[str] | None = None,
     assignee_id: int | None = None,
+    estimate: int | None = None,
 ) -> dict[str, object]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
         norm_title, norm_details = _update_card_conn(
             connection, board_id, card_id, title, details,
-            due_date=due_date, priority=priority, labels=labels, assignee_id=assignee_id,
+            due_date=due_date, priority=priority, labels=labels,
+            assignee_id=assignee_id, estimate=estimate,
         )
         _log_activity_conn(connection, board_id, user_id, "update_card", "card", card_id, norm_title)
     return {
@@ -725,6 +748,7 @@ def update_card(
         "priority": priority,
         "labels": labels or [],
         "assignee_id": str(assignee_id) if assignee_id else None,
+        "estimate": estimate,
     }
 
 
@@ -875,6 +899,12 @@ def _validate_priority(priority: str | None) -> str | None:
     return priority
 
 
+def _validate_estimate(estimate: int | None) -> int | None:
+    if estimate is not None and estimate < 0:
+        raise ValidationError("estimate must be a non-negative integer")
+    return estimate
+
+
 def _create_card_conn(
     connection: sqlite3.Connection,
     board_id: int,
@@ -886,10 +916,12 @@ def _create_card_conn(
     priority: str | None = None,
     labels: list[str] | None = None,
     assignee_id: int | None = None,
+    estimate: int | None = None,
 ) -> tuple[int, str, str]:
     normalized_title = _normalize_non_empty(title, "Card title")
     normalized_details = details.strip()
     _validate_priority(priority)
+    _validate_estimate(estimate)
     row = connection.execute(
         "SELECT id FROM board_columns WHERE id = ? AND board_id = ?",
         (column_id, board_id),
@@ -905,10 +937,10 @@ def _create_card_conn(
     labels_json = json.dumps(labels or [])
     cursor = connection.execute(
         """
-        INSERT INTO cards (board_id, column_id, title, details, position, due_date, priority, labels, assignee_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO cards (board_id, column_id, title, details, position, due_date, priority, labels, assignee_id, estimate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (board_id, column_id, normalized_title, normalized_details, position, due_date, priority, labels_json, assignee_id),
+        (board_id, column_id, normalized_title, normalized_details, position, due_date, priority, labels_json, assignee_id, estimate),
     )
     return int(cursor.lastrowid or 0), normalized_title, normalized_details
 
@@ -924,10 +956,12 @@ def _update_card_conn(
     priority: str | None = None,
     labels: list[str] | None = None,
     assignee_id: int | None = None,
+    estimate: int | None = None,
 ) -> tuple[str, str]:
     normalized_title = _normalize_non_empty(title, "Card title")
     normalized_details = details.strip()
     _validate_priority(priority)
+    _validate_estimate(estimate)
     card = connection.execute(
         "SELECT id FROM cards WHERE id = ? AND board_id = ?",
         (card_id, board_id),
@@ -939,10 +973,10 @@ def _update_card_conn(
         """
         UPDATE cards
         SET title = ?, details = ?, due_date = ?, priority = ?, labels = ?,
-            assignee_id = ?, updated_at = datetime('now')
+            assignee_id = ?, estimate = ?, updated_at = datetime('now')
         WHERE id = ?
         """,
-        (normalized_title, normalized_details, due_date, priority, labels_json, assignee_id, card_id),
+        (normalized_title, normalized_details, due_date, priority, labels_json, assignee_id, estimate, card_id),
     )
     return normalized_title, normalized_details
 
@@ -1142,7 +1176,8 @@ def get_board_stats(user_id: int, board_id: int) -> dict[str, object]:
         col_rows = connection.execute(
             """
             SELECT bc.id, bc.title,
-                   COUNT(c.id) AS card_count
+                   COUNT(c.id) AS card_count,
+                   COALESCE(SUM(c.estimate), 0) AS total_estimate
             FROM board_columns bc
             LEFT JOIN cards c ON c.column_id = bc.id AND c.board_id = ? AND c.archived = 0
             WHERE bc.board_id = ?
@@ -1167,17 +1202,26 @@ def get_board_stats(user_id: int, board_id: int) -> dict[str, object]:
         ).fetchall()
 
         total_row = connection.execute(
-            "SELECT COUNT(*) AS cnt FROM cards WHERE board_id = ? AND archived = 0",
+            """
+            SELECT COUNT(*) AS cnt, COALESCE(SUM(estimate), 0) AS total_estimate
+            FROM cards WHERE board_id = ? AND archived = 0
+            """,
             (board_id,),
         ).fetchone()
 
     cards_per_column = [
-        {"id": str(row["id"]), "title": str(row["title"]), "count": int(row["card_count"])}
+        {
+            "id": str(row["id"]),
+            "title": str(row["title"]),
+            "count": int(row["card_count"]),
+            "total_estimate": int(row["total_estimate"]),
+        }
         for row in col_rows
     ]
     by_priority = {str(row["priority"]): int(row["cnt"]) for row in priority_rows}
     return {
         "total_cards": int(total_row["cnt"]) if total_row else 0,
+        "total_estimate": int(total_row["total_estimate"]) if total_row else 0,
         "overdue_count": int(overdue_row["cnt"]) if overdue_row else 0,
         "cards_per_column": cards_per_column,
         "cards_by_priority": by_priority,
@@ -1320,7 +1364,7 @@ def export_board_data(user_id: int, board_id: int) -> dict[str, object]:
         card_rows = connection.execute(
             """
             SELECT c.id, c.column_id, c.title, c.details, c.position,
-                   c.due_date, c.priority, c.labels, c.assignee_id,
+                   c.due_date, c.priority, c.labels, c.assignee_id, c.estimate,
                    u.username AS assignee_username,
                    bc.title AS column_title
             FROM cards c
@@ -1351,6 +1395,7 @@ def export_board_data(user_id: int, board_id: int) -> dict[str, object]:
             "due_date": r["due_date"],
             "labels": labels,
             "assignee": r["assignee_username"],
+            "estimate": int(r["estimate"]) if r["estimate"] is not None else None,
         })
     return {
         "board": str(board_row["name"]) if board_row else "",
@@ -1358,6 +1403,95 @@ def export_board_data(user_id: int, board_id: int) -> dict[str, object]:
         "columns": columns,
         "cards": cards,
     }
+
+
+def list_card_checklist(user_id: int, board_id: int, card_id: int) -> list[dict[str, object]]:
+    """Return checklist items for a card, ordered by position."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        card = connection.execute(
+            "SELECT id FROM cards WHERE id = ? AND board_id = ?",
+            (card_id, board_id),
+        ).fetchone()
+        if card is None:
+            raise NotFoundError("Card not found")
+        rows = connection.execute(
+            "SELECT id, text, checked, position FROM card_checklists WHERE card_id = ? ORDER BY position ASC",
+            (card_id,),
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "text": str(row["text"]),
+            "checked": bool(row["checked"]),
+            "position": int(row["position"]),
+        }
+        for row in rows
+    ]
+
+
+def add_checklist_item(user_id: int, board_id: int, card_id: int, text: str) -> dict[str, object]:
+    """Append a new checklist item to a card."""
+    normalized = _normalize_non_empty(text, "Checklist item text")
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        card = connection.execute(
+            "SELECT id FROM cards WHERE id = ? AND board_id = ?",
+            (card_id, board_id),
+        ).fetchone()
+        if card is None:
+            raise NotFoundError("Card not found")
+        pos_row = connection.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM card_checklists WHERE card_id = ?",
+            (card_id,),
+        ).fetchone()
+        position = int(pos_row["next_pos"]) if pos_row else 0
+        cursor = connection.execute(
+            "INSERT INTO card_checklists (card_id, board_id, text, checked, position) VALUES (?, ?, ?, 0, ?)",
+            (card_id, board_id, normalized, position),
+        )
+        item_id = int(cursor.lastrowid or 0)
+    return {"id": str(item_id), "text": normalized, "checked": False, "position": position}
+
+
+def update_checklist_item(
+    user_id: int,
+    board_id: int,
+    card_id: int,
+    item_id: int,
+    *,
+    text: str | None = None,
+    checked: bool | None = None,
+) -> dict[str, object]:
+    """Update text and/or checked state of a checklist item."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        row = connection.execute(
+            "SELECT id, text, checked, position FROM card_checklists WHERE id = ? AND card_id = ? AND board_id = ?",
+            (item_id, card_id, board_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("Checklist item not found")
+        new_text = _normalize_non_empty(text, "Checklist item text") if text is not None else str(row["text"])
+        new_checked = checked if checked is not None else bool(row["checked"])
+        connection.execute(
+            "UPDATE card_checklists SET text = ?, checked = ? WHERE id = ?",
+            (new_text, 1 if new_checked else 0, item_id),
+        )
+    return {"id": str(item_id), "text": new_text, "checked": new_checked, "position": int(row["position"])}
+
+
+def delete_checklist_item(user_id: int, board_id: int, card_id: int, item_id: int) -> None:
+    """Delete a checklist item."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        row = connection.execute(
+            "SELECT id FROM card_checklists WHERE id = ? AND card_id = ? AND board_id = ?",
+            (item_id, card_id, board_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("Checklist item not found")
+        connection.execute("DELETE FROM card_checklists WHERE id = ?", (item_id,))
 
 
 SESSION_LIFETIME_SECONDS = 24 * 60 * 60  # 24 hours

@@ -27,6 +27,7 @@ class CreateCardPayload(BaseModel):
     priority: PRIORITY_VALUES | None = None
     labels: list[str] = Field(default_factory=list)
     assignee_id: str | None = Field(default=None, max_length=20)
+    estimate: int | None = Field(default=None, ge=0)
 
 
 class UpdateCardPayload(BaseModel):
@@ -36,6 +37,7 @@ class UpdateCardPayload(BaseModel):
     priority: PRIORITY_VALUES | None = None
     labels: list[str] = Field(default_factory=list)
     assignee_id: str | None = Field(default=None, max_length=20)
+    estimate: int | None = Field(default=None, ge=0)
 
 
 class MoveCardPayload(BaseModel):
@@ -76,3 +78,12 @@ class RegisterPayload(BaseModel):
 
 class AddCommentPayload(BaseModel):
     content: str = Field(max_length=4000)
+
+
+class AddChecklistItemPayload(BaseModel):
+    text: str = Field(max_length=1000)
+
+
+class UpdateChecklistItemPayload(BaseModel):
+    text: str | None = Field(default=None, max_length=1000)
+    checked: bool | None = None

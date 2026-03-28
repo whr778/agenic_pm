@@ -25,13 +25,14 @@ const boardPayload = {
 const mockUsers = [{ id: "1", username: "user" }];
 const mockStats = {
   total_cards: 3,
+  total_estimate: 0,
   overdue_count: 1,
   cards_per_column: [
-    { id: "1", title: "Backlog", count: 2 },
-    { id: "2", title: "To Do", count: 1 },
-    { id: "3", title: "In Progress", count: 0 },
-    { id: "4", title: "Review", count: 0 },
-    { id: "5", title: "Done", count: 0 },
+    { id: "1", title: "Backlog", count: 2, total_estimate: 0 },
+    { id: "2", title: "To Do", count: 1, total_estimate: 0 },
+    { id: "3", title: "In Progress", count: 0, total_estimate: 0 },
+    { id: "4", title: "Review", count: 0, total_estimate: 0 },
+    { id: "5", title: "Done", count: 0, total_estimate: 0 },
   ],
   cards_by_priority: { none: 3 },
 };
@@ -49,6 +50,30 @@ beforeEach(() => {
 
     if (url.includes("/stats") && method === "GET") {
       return new Response(JSON.stringify(mockStats), { status: 200 });
+    }
+
+    if (url.includes("/checklist") && method === "GET") {
+      return new Response(JSON.stringify([]), { status: 200 });
+    }
+
+    if (url.includes("/checklist") && method === "POST" && !url.match(/\/checklist\/\d+/)) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+      return new Response(
+        JSON.stringify({ id: "cl1", text: body.text ?? "", checked: false, position: 0 }),
+        { status: 200 }
+      );
+    }
+
+    if (url.match(/\/checklist\/\d+/) && method === "PUT") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { checked?: boolean; text?: string };
+      return new Response(
+        JSON.stringify({ id: "cl1", text: body.text ?? "item", checked: body.checked ?? false, position: 0 }),
+        { status: 200 }
+      );
+    }
+
+    if (url.match(/\/checklist\/\d+/) && method === "DELETE") {
+      return new Response(JSON.stringify({ status: "deleted" }), { status: 200 });
     }
 
     if (url.includes("/comments") && method === "GET") {
@@ -956,5 +981,128 @@ describe("KanbanBoard", () => {
 
     await userEvent.click(activityToggle);
     expect(screen.queryByTestId("activity-panel")).not.toBeInTheDocument();
+  });
+
+  it("shows estimate badge on card with estimate set", async () => {
+    const payload = structuredClone(boardPayload);
+    payload.cards["1"] = { ...payload.cards["1"], estimate: 5 };
+
+    vi.mocked(global.fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/users") return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(mockStats), { status: 200 });
+      if (url.includes("/checklist")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/comments")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/api/board") && method === "GET") return new Response(JSON.stringify(payload), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      return new Response(JSON.stringify({ detail: "Not found" }), { status: 404 });
+    });
+
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    expect(await screen.findByTestId("card-estimate-1")).toHaveTextContent("5 pts");
+    expect(screen.queryByTestId("card-estimate-2")).not.toBeInTheDocument();
+  });
+
+  it("shows estimate stat badge when total_estimate > 0", async () => {
+    const statsWithEst = { ...mockStats, total_estimate: 13 };
+
+    vi.mocked(global.fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/users") return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(statsWithEst), { status: 200 });
+      if (url.includes("/checklist")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/comments")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/api/board") && method === "GET") return new Response(JSON.stringify(boardPayload), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      return new Response(JSON.stringify({ detail: "Not found" }), { status: 404 });
+    });
+
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    expect(await screen.findByTestId("stats-estimate")).toHaveTextContent("13");
+  });
+
+  it("does not show estimate stat badge when total_estimate is 0", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    await screen.findByTestId("stats-total");
+
+    expect(screen.queryByTestId("stats-estimate")).not.toBeInTheDocument();
+  });
+
+  it("sends estimate when editing a card", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    const firstCard = screen.getByTestId("card-1");
+
+    await userEvent.click(within(firstCard).getByRole("button", { name: /edit card one/i }));
+    const estimateInput = within(firstCard).getByLabelText("Estimate");
+    await userEvent.clear(estimateInput);
+    await userEvent.type(estimateInput, "8");
+    await userEvent.click(within(firstCard).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      const calls = vi.mocked(global.fetch).mock.calls;
+      const putCall = calls.find(
+        ([url, opts]) =>
+          String(url).includes("/api/boards/1/cards/1") &&
+          (opts as RequestInit)?.method === "PUT"
+      );
+      expect(putCall).toBeDefined();
+      const body = JSON.parse(String((putCall![1] as RequestInit).body)) as { estimate?: number };
+      expect(body.estimate).toBe(8);
+    });
+  });
+
+  it("shows checklist panel when checklist button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const card1 = screen.getByTestId("card-1");
+    await userEvent.click(within(card1).getByRole("button", { name: /show checklist for card one/i }));
+
+    expect(await within(card1).findByTestId("checklist-1")).toBeInTheDocument();
+  });
+
+  it("adds a checklist item", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const card1 = screen.getByTestId("card-1");
+    await userEvent.click(within(card1).getByRole("button", { name: /show checklist for card one/i }));
+    await within(card1).findByTestId("checklist-1");
+
+    const checklistInput = within(card1).getByLabelText("New checklist item");
+    await userEvent.type(checklistInput, "Write docs");
+    await userEvent.click(within(card1).getByRole("button", { name: "Add" }));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/boards/1/cards/1/checklist",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+
+    await waitFor(() => {
+      expect(within(card1).getByText("Write docs")).toBeInTheDocument();
+    });
+  });
+
+  it("hides checklist panel when hide checklist button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const card1 = screen.getByTestId("card-1");
+    const toggleBtn = within(card1).getByRole("button", { name: /show checklist for card one/i });
+    await userEvent.click(toggleBtn);
+    await within(card1).findByTestId("checklist-1");
+
+    await userEvent.click(within(card1).getByRole("button", { name: /hide checklist/i }));
+    expect(within(card1).queryByTestId("checklist-1")).not.toBeInTheDocument();
   });
 });

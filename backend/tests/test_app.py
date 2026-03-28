@@ -1645,3 +1645,269 @@ def test_activity_log_limit_param(client: TestClient) -> None:
 
     log = client.get(f"/api/boards/{board_id}/activity?limit=3").json()
     assert len(log) <= 3
+
+
+# --- Estimate ---
+
+
+def test_create_card_with_estimate(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    response = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Estimated card", "details": "", "estimate": 5},
+    )
+    assert response.status_code == 200
+    assert response.json()["estimate"] == 5
+
+
+def test_update_card_sets_estimate(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    response = client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "Updated", "details": "", "estimate": 8},
+    )
+    assert response.status_code == 200
+    assert response.json()["estimate"] == 8
+
+
+def test_update_card_clears_estimate(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "Set estimate", "details": "", "estimate": 3},
+    )
+    response = client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "Clear estimate", "details": "", "estimate": None},
+    )
+    assert response.status_code == 200
+    assert response.json()["estimate"] is None
+
+
+def test_create_card_negative_estimate_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    response = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Bad estimate", "details": "", "estimate": -1},
+    )
+    assert response.status_code == 422
+
+
+def test_board_payload_includes_estimate(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Est card", "details": "", "estimate": 13},
+    )
+    board = client.get(f"/api/board/{board_id}").json()
+    cards = list(board["cards"].values())
+    est_card = next(c for c in cards if c["title"] == "Est card")
+    assert est_card["estimate"] == 13
+
+
+def test_stats_include_total_estimate(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Est A", "details": "", "estimate": 3},
+    )
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Est B", "details": "", "estimate": 5},
+    )
+
+    stats = client.get(f"/api/boards/{board_id}/stats").json()
+    assert "total_estimate" in stats
+    assert stats["total_estimate"] >= 8
+    assert "total_estimate" in stats["cards_per_column"][0]
+
+
+def test_export_includes_estimate(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Export est", "details": "", "estimate": 7},
+    )
+
+    export = client.get(f"/api/boards/{board_id}/export?format=json").json()
+    est_card = next(c for c in export["cards"] if c["title"] == "Export est")
+    assert est_card["estimate"] == 7
+
+
+# --- Checklists ---
+
+
+def test_checklist_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/boards/1/cards/1/checklist")
+    assert response.status_code == 401
+
+
+def test_checklist_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.get(f"/api/boards/{board_id}/cards/99999/checklist")
+    assert response.status_code == 404
+
+
+def test_add_and_list_checklist_items(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    add = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/checklist",
+        json={"text": "Write tests"},
+    )
+    assert add.status_code == 200
+    item = add.json()
+    assert item["text"] == "Write tests"
+    assert item["checked"] is False
+    assert "id" in item
+    assert "position" in item
+
+    items = client.get(f"/api/boards/{board_id}/cards/{card_id}/checklist").json()
+    assert len(items) == 1
+    assert items[0]["text"] == "Write tests"
+
+
+def test_add_multiple_checklist_items_ordered_by_position(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/checklist", json={"text": "First"})
+    client.post(f"/api/boards/{board_id}/cards/{card_id}/checklist", json={"text": "Second"})
+
+    items = client.get(f"/api/boards/{board_id}/cards/{card_id}/checklist").json()
+    assert len(items) == 2
+    assert items[0]["text"] == "First"
+    assert items[1]["text"] == "Second"
+    assert items[0]["position"] < items[1]["position"]
+
+
+def test_check_and_uncheck_checklist_item(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    item_id = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/checklist",
+        json={"text": "Do the thing"},
+    ).json()["id"]
+
+    checked = client.put(
+        f"/api/boards/{board_id}/cards/{card_id}/checklist/{item_id}",
+        json={"checked": True},
+    )
+    assert checked.status_code == 200
+    assert checked.json()["checked"] is True
+
+    unchecked = client.put(
+        f"/api/boards/{board_id}/cards/{card_id}/checklist/{item_id}",
+        json={"checked": False},
+    )
+    assert unchecked.status_code == 200
+    assert unchecked.json()["checked"] is False
+
+
+def test_update_checklist_item_text(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    item_id = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/checklist",
+        json={"text": "Original text"},
+    ).json()["id"]
+
+    updated = client.put(
+        f"/api/boards/{board_id}/cards/{card_id}/checklist/{item_id}",
+        json={"text": "Updated text"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["text"] == "Updated text"
+
+
+def test_delete_checklist_item(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    item_id = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/checklist",
+        json={"text": "To be deleted"},
+    ).json()["id"]
+
+    delete = client.delete(f"/api/boards/{board_id}/cards/{card_id}/checklist/{item_id}")
+    assert delete.status_code == 200
+
+    items = client.get(f"/api/boards/{board_id}/cards/{card_id}/checklist").json()
+    assert not any(i["id"] == item_id for i in items)
+
+
+def test_delete_checklist_item_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    response = client.delete(f"/api/boards/{board_id}/cards/{card_id}/checklist/99999")
+    assert response.status_code == 404
+
+
+def test_add_checklist_item_empty_text_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    response = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/checklist",
+        json={"text": "   "},
+    )
+    assert response.status_code == 400
+
+
+def test_checklist_items_deleted_with_card(client: TestClient) -> None:
+    """Checklist items are cascade-deleted when the card is permanently deleted."""
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    card_resp = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Card with checklist", "details": ""},
+    )
+    card_id = card_resp.json()["id"]
+
+    client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/checklist",
+        json={"text": "Item 1"},
+    )
+
+    # Archive then permanently delete
+    client.delete(f"/api/boards/{board_id}/cards/{card_id}")
+    client.delete(f"/api/boards/{board_id}/cards/{card_id}/permanent")
+
+    # Card is gone; list should return 404
+    response = client.get(f"/api/boards/{board_id}/cards/{card_id}/checklist")
+    assert response.status_code == 404

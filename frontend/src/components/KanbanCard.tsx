@@ -2,7 +2,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import clsx from "clsx";
 import { useEffect, useRef, useState } from "react";
-import type { AssignableUser, Card, Comment, Priority } from "@/lib/kanban";
+import type { AssignableUser, Card, ChecklistItem, Comment, Priority } from "@/lib/kanban";
 
 export type MoveDirection = "up" | "down" | "left" | "right";
 
@@ -19,6 +19,7 @@ type KanbanCardProps = {
     priority: Priority | null,
     labels: string[],
     assignee_id: string | null,
+    estimate: number | null,
   ) => void;
   onMove?: (cardId: string, direction: MoveDirection) => void;
   canMove?: { up: boolean; down: boolean; left: boolean; right: boolean };
@@ -91,7 +92,15 @@ export const KanbanCard = ({
   const [draftPriority, setDraftPriority] = useState<Priority | "">(card.priority ?? "");
   const [draftLabels, setDraftLabels] = useState((card.labels ?? []).join(", "));
   const [draftAssigneeId, setDraftAssigneeId] = useState(card.assignee_id ?? "");
+  const [draftEstimate, setDraftEstimate] = useState(card.estimate != null ? String(card.estimate) : "");
   const [titleError, setTitleError] = useState(false);
+
+  // Checklist state
+  const [showChecklist, setShowChecklist] = useState(false);
+  const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
+  const [checklistLoaded, setChecklistLoaded] = useState(false);
+  const [checklistInput, setChecklistInput] = useState("");
+  const [checklistSubmitting, setChecklistSubmitting] = useState(false);
 
   // Comments state
   const [showComments, setShowComments] = useState(false);
@@ -110,7 +119,22 @@ export const KanbanCard = ({
     setDraftPriority(card.priority ?? "");
     setDraftLabels((card.labels ?? []).join(", "));
     setDraftAssigneeId(card.assignee_id ?? "");
-  }, [card.title, card.details, card.due_date, card.priority, card.labels, card.assignee_id]);
+    setDraftEstimate(card.estimate != null ? String(card.estimate) : "");
+  }, [card.title, card.details, card.due_date, card.priority, card.labels, card.assignee_id, card.estimate]);
+
+  useEffect(() => {
+    if (showChecklist && !checklistLoaded) {
+      void fetch(`/api/boards/${boardId}/cards/${card.id}/checklist`, { credentials: "include" })
+        .then((r) => r.json())
+        .then((data: ChecklistItem[]) => {
+          setChecklist(data);
+          setChecklistLoaded(true);
+        })
+        .catch(() => {
+          setChecklistLoaded(true);
+        });
+    }
+  }, [showChecklist, checklistLoaded, boardId, card.id]);
 
   useEffect(() => {
     if (showComments && !commentsLoaded) {
@@ -153,8 +177,10 @@ export const KanbanCard = ({
       .map((l) => l.trim())
       .filter(Boolean);
     const assignee_id = draftAssigneeId || null;
+    const parsedEstimate = draftEstimate.trim() !== "" ? parseInt(draftEstimate, 10) : null;
+    const estimate = parsedEstimate !== null && !isNaN(parsedEstimate) && parsedEstimate >= 0 ? parsedEstimate : null;
 
-    onEdit(card.id, title, details, due_date, priority, labels, assignee_id);
+    onEdit(card.id, title, details, due_date, priority, labels, assignee_id, estimate);
     setIsEditing(false);
   };
 
@@ -165,6 +191,7 @@ export const KanbanCard = ({
     setDraftPriority(card.priority ?? "");
     setDraftLabels((card.labels ?? []).join(", "));
     setDraftAssigneeId(card.assignee_id ?? "");
+    setDraftEstimate(card.estimate != null ? String(card.estimate) : "");
     setTitleError(false);
     setIsEditing(false);
   };
@@ -198,8 +225,59 @@ export const KanbanCard = ({
     }
   };
 
+  const handleAddChecklistItem = async () => {
+    const text = checklistInput.trim();
+    if (!text || checklistSubmitting) return;
+    setChecklistSubmitting(true);
+    try {
+      const response = await fetch(
+        `/api/boards/${boardId}/cards/${card.id}/checklist`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        },
+      );
+      if (!response.ok) throw new Error("Failed to add item");
+      const newItem = (await response.json()) as ChecklistItem;
+      setChecklist((prev) => [...prev, newItem]);
+      setChecklistInput("");
+    } finally {
+      setChecklistSubmitting(false);
+    }
+  };
+
+  const handleToggleChecklistItem = async (itemId: string, checked: boolean) => {
+    const response = await fetch(
+      `/api/boards/${boardId}/cards/${card.id}/checklist/${itemId}`,
+      {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ checked }),
+      },
+    );
+    if (response.ok) {
+      const updated = (await response.json()) as ChecklistItem;
+      setChecklist((prev) => prev.map((item) => (item.id === itemId ? updated : item)));
+    }
+  };
+
+  const handleDeleteChecklistItem = async (itemId: string) => {
+    const response = await fetch(
+      `/api/boards/${boardId}/cards/${card.id}/checklist/${itemId}`,
+      { method: "DELETE", credentials: "include" },
+    );
+    if (response.ok) {
+      setChecklist((prev) => prev.filter((item) => item.id !== itemId));
+    }
+  };
+
   const dueDateStatus = getDueDateStatus(card.due_date);
   const assignee = card.assignee_username ?? null;
+  const checkedCount = checklist.filter((i) => i.checked).length;
+  const checklistProgress = checklist.length > 0 ? Math.round((checkedCount / checklist.length) * 100) : 0;
 
   return (
     <article
@@ -297,6 +375,18 @@ export const KanbanCard = ({
                 </select>
               </div>
             )}
+            <div>
+              <label className="block text-xs font-semibold text-[var(--gray-text)]">Estimate (points)</label>
+              <input
+                type="number"
+                min={0}
+                value={draftEstimate}
+                onChange={(e) => setDraftEstimate(e.target.value)}
+                placeholder="e.g. 3"
+                className="w-full rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs text-[var(--navy-dark)] outline-none"
+                aria-label="Estimate"
+              />
+            </div>
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -359,6 +449,24 @@ export const KanbanCard = ({
                   {dueDateLabel(card.due_date, dueDateStatus)}
                 </p>
               )}
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                {card.estimate != null && (
+                  <span
+                    className="rounded-full bg-[var(--dark-navy)]/10 px-2 py-0.5 text-xs font-semibold text-[var(--dark-navy)]"
+                    data-testid={`card-estimate-${card.id}`}
+                  >
+                    {card.estimate} pts
+                  </span>
+                )}
+                {checklist.length > 0 && !showChecklist && (
+                  <span
+                    className="rounded-full bg-[var(--gray-text)]/10 px-2 py-0.5 text-xs font-medium text-[var(--gray-text)]"
+                    data-testid={`checklist-progress-${card.id}`}
+                  >
+                    {checkedCount}/{checklist.length}
+                  </span>
+                )}
+              </div>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
               <button
@@ -368,6 +476,16 @@ export const KanbanCard = ({
                 aria-label={`Edit ${card.title}`}
               >
                 Edit
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowChecklist((v) => !v);
+                }}
+                className="rounded-full border border-transparent px-3 py-1 text-xs font-semibold text-[var(--gray-text)] transition hover:border-[var(--stroke)] hover:text-[var(--navy-dark)]"
+                aria-label={`${showChecklist ? "Hide" : "Show"} checklist for ${card.title}`}
+              >
+                {showChecklist ? "Hide checklist" : "Checklist"}
               </button>
               <button
                 type="button"
@@ -401,6 +519,67 @@ export const KanbanCard = ({
                 </div>
               )}
             </div>
+
+            {showChecklist && (
+              <div className="mt-2 space-y-2 border-t border-[var(--stroke)] pt-2" data-testid={`checklist-${card.id}`}>
+                {checklist.length > 0 && (
+                  <div className="mb-1">
+                    <div className="mb-1 flex items-center justify-between text-xs text-[var(--gray-text)]">
+                      <span>{checkedCount} of {checklist.length} done</span>
+                      <span>{checklistProgress}%</span>
+                    </div>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-[var(--stroke)]">
+                      <div
+                        className="h-full rounded-full bg-[var(--primary-blue)] transition-all"
+                        style={{ width: `${checklistProgress}%` }}
+                        data-testid={`checklist-bar-${card.id}`}
+                      />
+                    </div>
+                  </div>
+                )}
+                {checklist.map((item) => (
+                  <div key={item.id} className="flex items-center gap-2" data-testid={`checklist-item-${item.id}`}>
+                    <input
+                      type="checkbox"
+                      checked={item.checked}
+                      onChange={(e) => void handleToggleChecklistItem(item.id, e.target.checked)}
+                      className="h-3.5 w-3.5 accent-[var(--primary-blue)]"
+                      aria-label={`Toggle: ${item.text}`}
+                    />
+                    <span className={clsx("flex-1 text-xs", item.checked && "line-through text-[var(--gray-text)]")}>
+                      {item.text}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void handleDeleteChecklistItem(item.id)}
+                      className="text-[10px] text-[var(--gray-text)] hover:text-red-500"
+                      aria-label={`Delete checklist item: ${item.text}`}
+                    >
+                      x
+                    </button>
+                  </div>
+                ))}
+                <div className="flex gap-1">
+                  <input
+                    value={checklistInput}
+                    onChange={(e) => setChecklistInput(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") void handleAddChecklistItem(); }}
+                    placeholder="Add checklist item..."
+                    maxLength={1000}
+                    className="flex-1 rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs outline-none"
+                    aria-label="New checklist item"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleAddChecklistItem()}
+                    disabled={checklistSubmitting || !checklistInput.trim()}
+                    className="rounded-lg bg-[var(--primary-blue)] px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+            )}
 
             {showComments && (
               <div className="mt-2 space-y-2 border-t border-[var(--stroke)] pt-2" data-testid={`comments-${card.id}`}>

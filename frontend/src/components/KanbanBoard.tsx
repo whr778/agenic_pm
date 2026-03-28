@@ -352,11 +352,12 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     priority: Priority | null,
     labels: string[],
     assignee_id: string | null,
+    estimate: number | null,
   ) => {
     try {
       await apiRef.current(`/api/boards/${boardId}/cards/${cardId}`, {
         method: "PUT",
-        body: JSON.stringify({ title, details, due_date, priority, labels, assignee_id }),
+        body: JSON.stringify({ title, details, due_date, priority, labels, assignee_id, estimate }),
       });
       await Promise.all([loadBoard(), loadStats()]);
     } catch (editError) {
@@ -519,6 +520,12 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                     <p className="text-2xl font-bold text-[var(--navy-dark)]">{stats.total_cards}</p>
                     <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--gray-text)]">Cards</p>
                   </div>
+                  {stats.total_estimate > 0 && (
+                    <div className="flex-1 rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] px-4 py-3 text-center" data-testid="stats-estimate">
+                      <p className="text-2xl font-bold text-[var(--secondary-purple)]">{stats.total_estimate}</p>
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--gray-text)]">Points</p>
+                    </div>
+                  )}
                   {stats.overdue_count > 0 && (
                     <div className="flex-1 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-center" data-testid="stats-overdue">
                       <p className="text-2xl font-bold text-red-600">{stats.overdue_count}</p>
