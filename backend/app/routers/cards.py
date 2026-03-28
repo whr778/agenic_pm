@@ -109,6 +109,18 @@ def permanent_delete_card(request: Request, board_id: str, card_id: str) -> dict
     return {"status": "deleted"}
 
 
+@router.post("/{board_id}/cards/{card_id}/copy")
+def copy_card(request: Request, board_id: str, card_id: str) -> dict[str, object]:
+    """Duplicate a card in the same column."""
+    user_id = require_user_id(request)
+    parsed_board_id = parse_numeric_id(board_id, "board_id")
+    parsed_card_id = parse_numeric_id(card_id, "card_id")
+    try:
+        return db.copy_card(user_id, parsed_board_id, parsed_card_id)
+    except db.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/{board_id}/cards/{card_id}/move")
 def move_card(
     request: Request,

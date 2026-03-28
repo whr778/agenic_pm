@@ -1396,3 +1396,196 @@ describe("Swimlanes", () => {
     });
   });
 });
+
+describe("Notifications UI", () => {
+  const notifPayload = {
+    notifications: [
+      { id: "n1", type: "assignment", entity_type: "card", entity_id: "1", detail: "You were assigned to 'Card one'", is_read: false, createdAt: "2026-03-01T10:00:00" },
+      { id: "n2", type: "mention", entity_type: "card", entity_id: "2", detail: "Mentioned in a comment", is_read: true, createdAt: "2026-03-01T09:00:00" },
+    ],
+    unread_count: 1,
+  };
+
+  beforeEach(() => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, _init) => {
+      const url = String(input);
+      if (url.includes("/api/board/")) return new Response(JSON.stringify(structuredClone(boardPayload)), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(mockStats), { status: 200 });
+      if (url.includes("/api/users")) return new Response(JSON.stringify(mockUsers), { status: 200 });
+      if (url.includes("/sprints")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      if (url.includes("/api/notifications") && !url.includes("/read")) {
+        return new Response(JSON.stringify(notifPayload), { status: 200 });
+      }
+      if (url.includes("/read-all")) return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+      if (url.match(/\/notifications\/\w+\/read/)) return new Response(JSON.stringify({ status: "read" }), { status: 200 });
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+  });
+
+  it("shows notifications button in toolbar", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    expect(screen.getByTestId("notifications-btn")).toBeInTheDocument();
+  });
+
+  it("shows unread count badge when there are unread notifications", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    expect(await screen.findByTestId("notification-badge")).toBeInTheDocument();
+    expect(screen.getByTestId("notification-badge")).toHaveTextContent("1");
+  });
+
+  it("opens notifications panel when button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("notifications-btn"));
+    expect(await screen.findByTestId("notifications-panel")).toBeInTheDocument();
+  });
+
+  it("shows notification list in panel", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("notifications-btn"));
+    const panel = await screen.findByTestId("notifications-panel");
+    expect(within(panel).getByTestId("notification-n1")).toBeInTheDocument();
+    expect(within(panel).getByText(/You were assigned to/)).toBeInTheDocument();
+  });
+
+  it("shows mark all read button when there are unread notifications", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("notifications-btn"));
+    await screen.findByTestId("notifications-panel");
+    expect(screen.getByTestId("mark-all-read-btn")).toBeInTheDocument();
+  });
+
+  it("calls mark-all-read API when button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("notifications-btn"));
+    await screen.findByTestId("notifications-panel");
+    await userEvent.click(screen.getByTestId("mark-all-read-btn"));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/notifications/read-all",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+  });
+
+  it("calls mark-read API for individual notification", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("notifications-btn"));
+    await screen.findByTestId("notifications-panel");
+    await userEvent.click(screen.getByTestId("mark-read-n1"));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        "/api/notifications/n1/read",
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+  });
+});
+
+describe("Card copy UI", () => {
+  it("shows copy button on each card", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+    expect(screen.getByTestId("copy-card-1")).toBeInTheDocument();
+    expect(screen.getByTestId("copy-card-2")).toBeInTheDocument();
+  });
+
+  it("calls copy API when copy button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("copy-card-1"));
+
+    await waitFor(() => {
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining("/cards/1/copy"),
+        expect.objectContaining({ method: "POST" })
+      );
+    });
+  });
+});
+
+describe("Sprint burndown chart", () => {
+  const activeSprint = {
+    id: "s1",
+    name: "Sprint 1",
+    goal: "deliver",
+    start_date: "2026-03-01",
+    end_date: "2026-03-14",
+    status: "active" as const,
+  };
+
+  const burndownResponse = {
+    sprint: activeSprint,
+    total_points: 20,
+    completed_points: 8,
+    remaining_points: 12,
+    ideal_line: [
+      { date: "2026-03-01", ideal: 20 },
+      { date: "2026-03-07", ideal: 10 },
+      { date: "2026-03-14", ideal: 0 },
+    ],
+    today: "2026-03-07",
+  };
+
+  beforeEach(() => {
+    vi.spyOn(global, "fetch").mockImplementation(async (input, _init) => {
+      const url = String(input);
+      if (url.includes("/api/board/")) return new Response(JSON.stringify(structuredClone(boardPayload)), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(mockStats), { status: 200 });
+      if (url.includes("/api/users")) return new Response(JSON.stringify(mockUsers), { status: 200 });
+      if (url.includes("/api/notifications")) return new Response(JSON.stringify({ notifications: [], unread_count: 0 }), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      if (url.includes("/sprints") && url.endsWith("/sprints")) {
+        return new Response(JSON.stringify([activeSprint]), { status: 200 });
+      }
+      if (url.includes("/burndown")) return new Response(JSON.stringify(burndownResponse), { status: 200 });
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+  });
+
+  it("shows burndown button on active sprints", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("sprints-toggle"));
+    expect(await screen.findByTestId("burndown-btn-s1")).toBeInTheDocument();
+  });
+
+  it("loads and shows burndown panel when button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("sprints-toggle"));
+    await userEvent.click(await screen.findByTestId("burndown-btn-s1"));
+
+    expect(await screen.findByTestId("burndown-panel")).toBeInTheDocument();
+    expect(await screen.findByTestId("burndown-chart")).toBeInTheDocument();
+  });
+
+  it("shows point totals in burndown panel", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("sprints-toggle"));
+    await userEvent.click(await screen.findByTestId("burndown-btn-s1"));
+
+    await screen.findByTestId("burndown-panel");
+    expect(screen.getByText(/20 pts/)).toBeInTheDocument();
+    expect(screen.getByText(/12 pts/)).toBeInTheDocument();
+  });
+});

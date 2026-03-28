@@ -23,12 +23,93 @@ import {
   type AssignableUser,
   type BoardData,
   type BoardStats,
+  type BurndownData,
   type Column,
+  type Notification,
   type Priority,
   type Sprint,
   type TimeReport,
 } from "@/lib/kanban";
 import type { MoveDirection } from "@/components/KanbanCard";
+
+const PAD_L = 42;
+const PAD_R = 12;
+const PAD_T = 12;
+const PAD_B = 32;
+const W = 560;
+const H = 200;
+const CHART_W = W - PAD_L - PAD_R;
+const CHART_H = H - PAD_T - PAD_B;
+
+function BurndownChart({ data }: { data: BurndownData }) {
+  const { ideal_line, total_points, remaining_points, today } = data;
+  if (ideal_line.length < 2) return null;
+
+  const dates = ideal_line.map((p) => p.date);
+  const startDate = dates[0];
+  const endDate = dates[dates.length - 1];
+  const totalDays = ideal_line.length - 1;
+  const maxY = total_points > 0 ? total_points : 1;
+
+  const toX = (date: string) => {
+    const dayIdx = dates.indexOf(date);
+    return dayIdx >= 0 ? PAD_L + (dayIdx / totalDays) * CHART_W : null;
+  };
+  const toY = (pts: number) => PAD_T + (1 - pts / maxY) * CHART_H;
+
+  const idealPath = ideal_line
+    .map((p, i) => `${i === 0 ? "M" : "L"} ${PAD_L + (i / totalDays) * CHART_W} ${toY(p.ideal)}`)
+    .join(" ");
+
+  const todayX = toX(today);
+  const actualY = toY(remaining_points);
+
+  const tickDates = ideal_line.filter((_, i) => i === 0 || i === Math.floor(totalDays / 2) || i === totalDays);
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-w-[560px]" data-testid="burndown-chart" aria-label="Sprint burndown chart">
+      {/* Axes */}
+      <line x1={PAD_L} y1={PAD_T} x2={PAD_L} y2={PAD_T + CHART_H} stroke="#e5e7eb" strokeWidth={1} />
+      <line x1={PAD_L} y1={PAD_T + CHART_H} x2={PAD_L + CHART_W} y2={PAD_T + CHART_H} stroke="#e5e7eb" strokeWidth={1} />
+      {/* Y-axis labels */}
+      {[0, 0.5, 1].map((frac) => {
+        const pts = Math.round(maxY * (1 - frac));
+        const y = PAD_T + frac * CHART_H;
+        return (
+          <g key={frac}>
+            <line x1={PAD_L - 3} y1={y} x2={PAD_L} y2={y} stroke="#9ca3af" strokeWidth={1} />
+            <text x={PAD_L - 5} y={y + 4} textAnchor="end" fontSize={9} fill="#6b7280">{pts}</text>
+          </g>
+        );
+      })}
+      {/* X-axis date labels */}
+      {tickDates.map((p) => {
+        const x = toX(p.date);
+        if (x === null) return null;
+        return (
+          <text key={p.date} x={x} y={PAD_T + CHART_H + 14} textAnchor="middle" fontSize={8} fill="#6b7280">
+            {p.date.slice(5)}
+          </text>
+        );
+      })}
+      {/* Ideal line */}
+      <path d={idealPath} stroke="#9ca3af" strokeWidth={1.5} fill="none" strokeDasharray="4 3" />
+      {/* Today's actual point */}
+      {todayX !== null && (
+        <>
+          <line x1={todayX} y1={PAD_T} x2={todayX} y2={PAD_T + CHART_H} stroke="#209dd7" strokeWidth={1} strokeDasharray="3 2" opacity={0.5} />
+          <circle cx={todayX} cy={actualY} r={5} fill="#209dd7" />
+          <text x={todayX + 7} y={actualY + 4} fontSize={9} fill="#209dd7" fontWeight="bold">{remaining_points}pts</text>
+        </>
+      )}
+      {/* Legend */}
+      <line x1={W - 110} y1={PAD_T + 6} x2={W - 95} y2={PAD_T + 6} stroke="#9ca3af" strokeWidth={1.5} strokeDasharray="4 3" />
+      <text x={W - 92} y={PAD_T + 10} fontSize={9} fill="#6b7280">Ideal</text>
+      <circle cx={W - 64} cy={PAD_T + 6} r={4} fill="#209dd7" />
+      <text x={W - 58} y={PAD_T + 10} fontSize={9} fill="#209dd7">Actual</text>
+    </svg>
+  );
+}
 
 export const KanbanBoard = ({ boardId }: { boardId: string }) => {
   type ChatMessage = { id?: string; role: "user" | "assistant" | "system"; content: string };
@@ -84,6 +165,16 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
 
   // Keyboard shortcuts overlay
   const [showShortcuts, setShowShortcuts] = useState(false);
+
+  // Notifications
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [showNotifications, setShowNotifications] = useState(false);
+
+  // Sprint burndown
+  const [burndownData, setBurndownData] = useState<BurndownData | null>(null);
+  const [burndownLoading, setBurndownLoading] = useState(false);
+  const [activeBurndownSprintId, setActiveBurndownSprintId] = useState<string | null>(null);
 
   const filterInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -171,6 +262,17 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     }
   }, [boardId]);
 
+  const loadNotifications = useCallback(async () => {
+    try {
+      const response = await apiRef.current("/api/notifications");
+      const data = (await response.json()) as { notifications: Notification[]; unread_count: number };
+      setNotifications(data.notifications);
+      setUnreadCount(data.unread_count);
+    } catch {
+      // silent fail — notifications are non-critical
+    }
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -180,9 +282,12 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
       loadUsers(controller.signal),
       loadStats(controller.signal),
       loadSprints(controller.signal),
+      loadNotifications(),
     ]);
-    return () => controller.abort();
-  }, [loadBoard, loadChat, loadUsers, loadStats, loadSprints]);
+    // Poll notifications every 30 seconds
+    const pollId = setInterval(() => { void loadNotifications(); }, 30_000);
+    return () => { controller.abort(); clearInterval(pollId); };
+  }, [loadBoard, loadChat, loadUsers, loadStats, loadSprints, loadNotifications]);
 
   useEffect(() => {
     setBoardNameDraft(board?.name ?? initialData.name);
@@ -514,6 +619,42 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     }
   }, [boardId]);
 
+  const handleMarkNotificationRead = async (id: string) => {
+    try {
+      await apiRef.current(`/api/notifications/${id}/read`, { method: "POST" });
+      setNotifications((prev) => prev.map((n) => n.id === id ? { ...n, is_read: true } : n));
+      setUnreadCount((c) => Math.max(0, c - 1));
+    } catch { /* ignore */ }
+  };
+
+  const handleMarkAllRead = async () => {
+    try {
+      await apiRef.current("/api/notifications/read-all", { method: "POST" });
+      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+      setUnreadCount(0);
+    } catch { /* ignore */ }
+  };
+
+  const handleCopyCard = async (cardId: string) => {
+    try {
+      await apiRef.current(`/api/boards/${boardId}/cards/${cardId}/copy`, { method: "POST" });
+      void loadBoard();
+    } catch { /* ignore */ }
+  };
+
+  const loadBurndown = useCallback(async (sprintId: string) => {
+    setBurndownLoading(true);
+    setBurndownData(null);
+    try {
+      const response = await apiRef.current(`/api/boards/${boardId}/sprints/${sprintId}/burndown`);
+      setBurndownData((await response.json()) as BurndownData);
+    } catch {
+      setBurndownData(null);
+    } finally {
+      setBurndownLoading(false);
+    }
+  }, [boardId]);
+
   const handleMoveCard = async (cardId: string, direction: MoveDirection) => {
     if (!board) return;
     const colIndex = board.columns.findIndex((c) => c.cardIds.includes(cardId));
@@ -764,6 +905,26 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
               <option value="priority">By priority</option>
               <option value="assignee">By assignee</option>
             </select>
+            {/* Notification bell */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => { setShowNotifications((v) => !v); if (!showNotifications) void loadNotifications(); }}
+                className={`relative rounded-xl border px-3 py-2 text-sm font-semibold transition ${showNotifications ? "border-[var(--accent-yellow)] bg-[var(--accent-yellow)]/10 text-[var(--navy-dark)]" : "border-[var(--stroke)] text-[var(--gray-text)] hover:text-[var(--navy-dark)]"}`}
+                aria-label="Notifications"
+                data-testid="notifications-btn"
+              >
+                Notifications
+                {unreadCount > 0 && (
+                  <span
+                    className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white"
+                    data-testid="notification-badge"
+                  >
+                    {unreadCount > 9 ? "9+" : unreadCount}
+                  </span>
+                )}
+              </button>
+            </div>
             <button
               type="button"
               onClick={() => setShowShortcuts(true)}
@@ -875,6 +1036,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                   onArchiveCard={handleArchiveCard}
                   onEditCard={handleEditCard}
                   onMoveCard={handleMoveCard}
+                  onCopyCard={handleCopyCard}
                   swimlaneGroup={swimlaneGroup}
                 />
               ))}
@@ -1127,15 +1289,30 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                           </button>
                         )}
                         {sprint.status === "active" && (
-                          <button
-                            type="button"
-                            onClick={() => void handleCompleteSprint(sprint.id)}
-                            className="rounded-xl border border-[var(--primary-blue)] px-3 py-1.5 text-xs font-semibold text-[var(--primary-blue)] hover:bg-[var(--primary-blue)]/10"
-                            aria-label={`Complete sprint ${sprint.name}`}
-                            data-testid={`complete-sprint-${sprint.id}`}
-                          >
-                            Complete
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const isOpen = activeBurndownSprintId === sprint.id;
+                                setActiveBurndownSprintId(isOpen ? null : sprint.id);
+                                if (!isOpen) void loadBurndown(sprint.id);
+                              }}
+                              className={`rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${activeBurndownSprintId === sprint.id ? "border-[var(--accent-yellow)] bg-[var(--accent-yellow)]/10 text-[var(--navy-dark)]" : "border-[var(--stroke)] text-[var(--gray-text)] hover:text-[var(--navy-dark)]"}`}
+                              aria-label={`Show burndown for ${sprint.name}`}
+                              data-testid={`burndown-btn-${sprint.id}`}
+                            >
+                              Burndown
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void handleCompleteSprint(sprint.id)}
+                              className="rounded-xl border border-[var(--primary-blue)] px-3 py-1.5 text-xs font-semibold text-[var(--primary-blue)] hover:bg-[var(--primary-blue)]/10"
+                              aria-label={`Complete sprint ${sprint.name}`}
+                              data-testid={`complete-sprint-${sprint.id}`}
+                            >
+                              Complete
+                            </button>
+                          </>
                         )}
                         {sprint.status !== "active" && (
                           <button
@@ -1153,6 +1330,42 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                   ))}
                 </ul>
               )}
+            </section>
+          )}
+
+          {/* Sprint burndown chart */}
+          {activeBurndownSprintId && (
+            <section
+              className="rounded-[28px] border border-[var(--stroke)] bg-white/90 p-6 shadow-[var(--shadow)]"
+              data-testid="burndown-panel"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="font-display text-xl font-semibold text-[var(--navy-dark)]">Sprint Burndown</h2>
+                <button
+                  type="button"
+                  onClick={() => void loadBurndown(activeBurndownSprintId)}
+                  className="text-xs text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+                  aria-label="Refresh burndown"
+                >
+                  Refresh
+                </button>
+              </div>
+              {burndownLoading ? (
+                <p className="mt-4 text-sm text-[var(--gray-text)]">Loading...</p>
+              ) : burndownData ? (
+                <div className="mt-4">
+                  <div className="mb-3 flex gap-6 text-sm">
+                    <span className="text-[var(--gray-text)]">Total: <strong className="text-[var(--navy-dark)]">{burndownData.total_points} pts</strong></span>
+                    <span className="text-[var(--gray-text)]">Done: <strong className="text-green-700">{burndownData.completed_points} pts</strong></span>
+                    <span className="text-[var(--gray-text)]">Remaining: <strong className="text-[var(--navy-dark)]">{burndownData.remaining_points} pts</strong></span>
+                  </div>
+                  {burndownData.ideal_line.length > 1 ? (
+                    <BurndownChart data={burndownData} />
+                  ) : (
+                    <p className="text-sm text-[var(--gray-text)]">Set sprint start and end dates to see the burndown chart.</p>
+                  )}
+                </div>
+              ) : null}
             </section>
           )}
 
@@ -1205,6 +1418,59 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                     Total: {timeReport.total_minutes} minutes
                   </p>
                 </div>
+              )}
+            </section>
+          )}
+
+          {/* Notifications panel */}
+          {showNotifications && (
+            <section
+              className="rounded-[28px] border border-[var(--stroke)] bg-white/90 p-6 shadow-[var(--shadow)]"
+              data-testid="notifications-panel"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="font-display text-xl font-semibold text-[var(--navy-dark)]">Notifications</h2>
+                {unreadCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void handleMarkAllRead()}
+                    className="text-xs text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+                    data-testid="mark-all-read-btn"
+                  >
+                    Mark all read
+                  </button>
+                )}
+              </div>
+              {notifications.length === 0 ? (
+                <p className="mt-4 text-sm text-[var(--gray-text)]">No notifications yet.</p>
+              ) : (
+                <ul className="mt-4 space-y-2" data-testid="notifications-list">
+                  {notifications.map((n) => (
+                    <li
+                      key={n.id}
+                      className={`flex items-start justify-between gap-3 rounded-xl px-3 py-2 ${n.is_read ? "bg-[var(--surface)]" : "bg-blue-50 ring-1 ring-blue-200"}`}
+                      data-testid={`notification-${n.id}`}
+                    >
+                      <div className="min-w-0">
+                        <span className={`mr-2 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase ${n.type === "mention" ? "bg-purple-100 text-purple-700" : "bg-blue-100 text-blue-700"}`}>
+                          {n.type}
+                        </span>
+                        <span className="text-sm text-[var(--navy-dark)]">{n.detail}</span>
+                      </div>
+                      {!n.is_read && (
+                        <button
+                          type="button"
+                          onClick={() => void handleMarkNotificationRead(n.id)}
+                          className="shrink-0 text-[10px] text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+                          aria-label="Mark as read"
+                          data-testid={`mark-read-${n.id}`}
+                        >
+                          Read
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               )}
             </section>
           )}

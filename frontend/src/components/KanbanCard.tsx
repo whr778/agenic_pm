@@ -26,6 +26,7 @@ type KanbanCardProps = {
   ) => void;
   onMove?: (cardId: string, direction: MoveDirection) => void;
   canMove?: { up: boolean; down: boolean; left: boolean; right: boolean };
+  onCopy?: (cardId: string) => void;
 };
 
 const PRIORITY_COLORS: Record<Priority, string> = {
@@ -87,6 +88,7 @@ export const KanbanCard = ({
   onEdit,
   onMove,
   canMove,
+  onCopy,
 }: KanbanCardProps) => {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: card.id });
@@ -699,6 +701,17 @@ export const KanbanCard = ({
               >
                 {showTimeLogs ? "Hide time" : "Time"}
               </button>
+              {onCopy && (
+                <button
+                  type="button"
+                  onClick={() => onCopy(card.id)}
+                  className="rounded-full border border-transparent px-3 py-1 text-xs font-semibold text-[var(--gray-text)] transition hover:border-[var(--stroke)] hover:text-[var(--navy-dark)]"
+                  aria-label={`Copy ${card.title}`}
+                  data-testid={`copy-card-${card.id}`}
+                >
+                  Copy
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => onArchive(card.id)}

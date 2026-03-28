@@ -100,6 +100,17 @@ def complete_sprint(request: Request, board_id: str, sprint_id: str) -> dict[str
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/{board_id}/sprints/{sprint_id}/burndown")
+def get_burndown(request: Request, board_id: str, sprint_id: str) -> dict[str, object]:
+    user_id = require_user_id(request)
+    parsed_board_id = parse_numeric_id(board_id, "board_id")
+    parsed_sprint_id = parse_numeric_id(sprint_id, "sprint_id")
+    try:
+        return db.get_sprint_burndown(user_id, parsed_board_id, parsed_sprint_id)
+    except db.NotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/{board_id}/sprints/{sprint_id}/stats")
 def get_sprint_stats(request: Request, board_id: str, sprint_id: str) -> dict[str, object]:
     user_id = require_user_id(request)

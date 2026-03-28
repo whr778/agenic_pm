@@ -22,6 +22,7 @@ type KanbanColumnProps = {
   onArchiveCard: (columnId: string, cardId: string) => void;
   onEditCard: (cardId: string, title: string, details: string, due_date: string | null, priority: Priority | null, labels: string[], assignee_id: string | null, estimate: number | null, sprint_id: string | null) => void;
   onMoveCard?: (cardId: string, direction: MoveDirection) => void;
+  onCopyCard?: (cardId: string) => void;
 };
 
 const PRIORITY_ORDER = ["critical", "high", "medium", "low", ""] as const;
@@ -68,6 +69,7 @@ export const KanbanColumn = ({
   onArchiveCard,
   onEditCard,
   onMoveCard,
+  onCopyCard,
 }: KanbanColumnProps) => {
   const { setNodeRef, isOver } = useDroppable({ id: column.id });
   const [draftTitle, setDraftTitle] = useState(column.title);
@@ -209,6 +211,7 @@ export const KanbanColumn = ({
                 onArchive={(cardId) => onArchiveCard(column.id, cardId)}
                 onEdit={onEditCard}
                 onMove={onMoveCard}
+                onCopy={onCopyCard}
                 canMove={{
                   up: index > 0,
                   down: index < cards.length - 1,
@@ -234,6 +237,7 @@ export const KanbanColumn = ({
                     onArchive={(cardId) => onArchiveCard(column.id, cardId)}
                     onEdit={onEditCard}
                     onMove={onMoveCard}
+                    onCopy={onCopyCard}
                     canMove={{
                       up: index > 0,
                       down: index < group.cards.length - 1,

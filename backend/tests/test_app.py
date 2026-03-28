@@ -2810,3 +2810,428 @@ def test_time_report_board_not_found(client: TestClient) -> None:
     login(client)
     response = client.get("/api/boards/99999/time-report")
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Notification tests
+# ---------------------------------------------------------------------------
+
+def _create_second_user(client: TestClient, username: str = "other_notify") -> None:
+    """Create a non-admin user via the admin endpoint."""
+    login(client)  # ensure logged in as admin
+    client.post("/api/admin/users", json={"username": username, "password": "pass", "role": "user"})
+
+
+def test_notifications_empty_on_fresh_user(client: TestClient) -> None:
+    login(client)
+    response = client.get("/api/notifications")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["notifications"] == []
+    assert data["unread_count"] == 0
+
+
+def test_notification_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/notifications")
+    assert response.status_code == 401
+
+
+def test_assignment_notification_on_create_card(client: TestClient) -> None:
+    """Creating a card with an assignee notifies that assignee."""
+    _create_second_user(client, "assignee_nc")
+
+    # Get assignee user id via admin API
+    users = client.get("/api/admin/users").json()["users"]
+    assignee = next(u for u in users if u["username"] == "assignee_nc")
+    assignee_id = assignee["id"]
+
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Notify me", "details": "", "assignee_id": str(assignee_id)},
+    )
+
+    # Log in as assignee and check notifications
+    second = TestClient(client.app)
+    second.post("/api/auth/login", json={"username": "assignee_nc", "password": "pass"})
+    resp = second.get("/api/notifications")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["unread_count"] >= 1
+    assert any("Notify me" in n["detail"] for n in data["notifications"])
+    assert all(n["type"] == "assignment" for n in data["notifications"])
+
+
+def test_no_assignment_notification_self_assign(client: TestClient) -> None:
+    """Assigning a card to yourself should not create a notification."""
+    login(client)
+    users = client.get("/api/admin/users").json()["users"]
+    self_user = next(u for u in users if u["username"] == "user")
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Self", "details": "", "assignee_id": str(self_user["id"])},
+    )
+    resp = client.get("/api/notifications")
+    assert resp.json()["unread_count"] == 0
+
+
+def test_assignment_notification_on_update_card(client: TestClient) -> None:
+    """Updating a card to set a new assignee notifies them."""
+    _create_second_user(client, "reassignee_nu")
+    users = client.get("/api/admin/users").json()["users"]
+    assignee = next(u for u in users if u["username"] == "reassignee_nu")
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id, "Reassign test")
+
+    client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "Reassign test", "details": "", "assignee_id": str(assignee["id"])},
+    )
+
+    second = TestClient(client.app)
+    second.post("/api/auth/login", json={"username": "reassignee_nu", "password": "pass"})
+    resp = second.get("/api/notifications")
+    assert resp.json()["unread_count"] >= 1
+
+
+def test_no_notification_when_assignee_unchanged(client: TestClient) -> None:
+    """Updating a card without changing assignee must not re-notify."""
+    _create_second_user(client, "same_assignee_nu")
+    users = client.get("/api/admin/users").json()["users"]
+    assignee = next(u for u in users if u["username"] == "same_assignee_nu")
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id, "No re-notify")
+
+    # First assign
+    client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "No re-notify", "details": "", "assignee_id": str(assignee["id"])},
+    )
+    # Update again with same assignee
+    client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "No re-notify v2", "details": "", "assignee_id": str(assignee["id"])},
+    )
+
+    second = TestClient(client.app)
+    second.post("/api/auth/login", json={"username": "same_assignee_nu", "password": "pass"})
+    data = second.get("/api/notifications").json()
+    # Only one notification (from first assignment), not two
+    assert data["unread_count"] == 1
+
+
+def test_mention_notification_on_comment(client: TestClient) -> None:
+    """@mention in a comment notifies the mentioned user."""
+    _create_second_user(client, "mentioned_nu")
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+
+    client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/comments",
+        json={"content": "Hey @mentioned_nu please review"},
+    )
+
+    second = TestClient(client.app)
+    second.post("/api/auth/login", json={"username": "mentioned_nu", "password": "pass"})
+    resp = second.get("/api/notifications")
+    data = resp.json()
+    assert data["unread_count"] >= 1
+    assert any(n["type"] == "mention" for n in data["notifications"])
+
+
+def test_no_mention_notification_for_nonexistent_user(client: TestClient) -> None:
+    """Mentioning a username that doesn't exist does not raise an error."""
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    resp = client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/comments",
+        json={"content": "Hey @ghost_user_xyz please look"},
+    )
+    assert resp.status_code == 200  # no error
+
+
+def test_no_self_mention_notification(client: TestClient) -> None:
+    """Mentioning yourself in a comment does not create a notification."""
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id)
+    client.post(
+        f"/api/boards/{board_id}/cards/{card_id}/comments",
+        json={"content": "Reminder for @user to finish this"},
+    )
+    resp = client.get("/api/notifications")
+    assert resp.json()["unread_count"] == 0
+
+
+def test_mark_notification_read(client: TestClient) -> None:
+    """Mark a single notification as read."""
+    _create_second_user(client, "mark_read_nu")
+    users = client.get("/api/admin/users").json()["users"]
+    assignee = next(u for u in users if u["username"] == "mark_read_nu")
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Mark read test", "details": "", "assignee_id": str(assignee["id"])},
+    )
+
+    second = TestClient(client.app)
+    second.post("/api/auth/login", json={"username": "mark_read_nu", "password": "pass"})
+    notifs = second.get("/api/notifications").json()["notifications"]
+    notif_id = notifs[0]["id"]
+
+    resp = second.post(f"/api/notifications/{notif_id}/read")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "read"
+
+    updated = second.get("/api/notifications").json()
+    assert updated["unread_count"] == 0
+    assert updated["notifications"][0]["is_read"] is True
+
+
+def test_mark_notification_read_wrong_user(client: TestClient) -> None:
+    """A user cannot mark another user's notification as read."""
+    _create_second_user(client, "wrong_user_nread")
+    users = client.get("/api/admin/users").json()["users"]
+    assignee = next(u for u in users if u["username"] == "wrong_user_nread")
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Other card", "details": "", "assignee_id": str(assignee["id"])},
+    )
+
+    second = TestClient(client.app)
+    second.post("/api/auth/login", json={"username": "wrong_user_nread", "password": "pass"})
+    notif_id = second.get("/api/notifications").json()["notifications"][0]["id"]
+
+    # The original user (admin/user) tries to mark it — they don't own it
+    resp = client.post(f"/api/notifications/{notif_id}/read")
+    assert resp.status_code == 404
+
+
+def test_mark_all_notifications_read(client: TestClient) -> None:
+    """Mark all notifications as read at once."""
+    _create_second_user(client, "mark_all_nu")
+    users = client.get("/api/admin/users").json()["users"]
+    assignee = next(u for u in users if u["username"] == "mark_all_nu")
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    # Create two cards assigned to the user → two notifications
+    for title in ("Card A", "Card B"):
+        client.post(
+            f"/api/boards/{board_id}/cards",
+            json={"columnId": col_id, "title": title, "details": "", "assignee_id": str(assignee["id"])},
+        )
+
+    second = TestClient(client.app)
+    second.post("/api/auth/login", json={"username": "mark_all_nu", "password": "pass"})
+    assert second.get("/api/notifications").json()["unread_count"] == 2
+
+    resp = second.post("/api/notifications/read-all")
+    assert resp.status_code == 200
+    assert second.get("/api/notifications").json()["unread_count"] == 0
+
+
+def test_mark_all_read_requires_auth(client: TestClient) -> None:
+    response = client.post("/api/notifications/read-all")
+    assert response.status_code == 401
+
+
+def test_notification_not_found_returns_404(client: TestClient) -> None:
+    login(client)
+    resp = client.post("/api/notifications/99999/read")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Card copy tests
+# ---------------------------------------------------------------------------
+
+def test_copy_card(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id, "Original card")
+
+    resp = client.post(f"/api/boards/{board_id}/cards/{card_id}/copy")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["title"] == "Original card (copy)"
+    assert "id" in data
+    assert data["id"] != card_id
+
+
+def test_copy_card_appears_in_board(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id, "To be copied")
+
+    resp = client.post(f"/api/boards/{board_id}/cards/{card_id}/copy")
+    new_id = resp.json()["id"]
+
+    board = client.get(f"/api/board/{board_id}").json()
+    all_card_ids = [cid for col in board["columns"] for cid in col["cardIds"]]
+    assert new_id in all_card_ids
+
+
+def test_copy_card_preserves_fields(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_first_col_id(client, board_id)
+    original = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Rich card", "details": "some details",
+              "priority": "high", "labels": ["backend"], "estimate": 5},
+    ).json()
+
+    resp = client.post(f"/api/boards/{board_id}/cards/{original['id']}/copy")
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "Rich card (copy)"
+
+    # Verify the copy is in the same column
+    board = client.get(f"/api/board/{board_id}").json()
+    col = next(c for c in board["columns"] if c["id"] == col_id)
+    assert resp.json()["id"] in col["cardIds"]
+
+
+def test_copy_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    resp = client.post(f"/api/boards/{board_id}/cards/99999/copy")
+    assert resp.status_code == 404
+
+
+def test_copy_card_requires_auth(client: TestClient) -> None:
+    resp = client.post("/api/boards/1/cards/1/copy")
+    assert resp.status_code == 401
+
+
+def test_copy_archived_card_not_found(client: TestClient) -> None:
+    """Copying an archived card should fail with 404."""
+    login(client)
+    board_id = get_board_id(client)
+    card_id = _create_card_simple(client, board_id, "To archive")
+    client.delete(f"/api/boards/{board_id}/cards/{card_id}")  # archive it
+    resp = client.post(f"/api/boards/{board_id}/cards/{card_id}/copy")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Sprint burndown tests
+# ---------------------------------------------------------------------------
+
+def _create_sprint_with_dates(client: TestClient, board_id: str, start: str, end: str, name: str = "Test Sprint") -> str:
+    resp = client.post(
+        f"/api/boards/{board_id}/sprints",
+        json={"name": name, "goal": "finish", "start_date": start, "end_date": end},
+    )
+    return resp.json()["id"]
+
+
+def test_sprint_burndown_no_cards(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = _create_sprint_with_dates(client, board_id, "2026-01-01", "2026-01-14", "Empty Sprint")
+
+    resp = client.get(f"/api/boards/{board_id}/sprints/{sprint_id}/burndown")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_points"] == 0
+    assert data["remaining_points"] == 0
+    assert data["completed_points"] == 0
+    assert len(data["ideal_line"]) > 0  # has date points
+    assert data["sprint"]["name"] == "Empty Sprint"
+
+
+def test_sprint_burndown_with_estimates(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = _create_sprint_with_dates(client, board_id, "2026-01-01", "2026-01-10", "Estimate Sprint")
+    col_id = _get_first_col_id(client, board_id)
+
+    # Create two cards with estimates assigned to the sprint
+    for pts in (3, 5):
+        client.post(
+            f"/api/boards/{board_id}/cards",
+            json={"columnId": col_id, "title": f"Card {pts}pts", "details": "",
+                  "estimate": pts, "sprint_id": sprint_id},
+        )
+
+    resp = client.get(f"/api/boards/{board_id}/sprints/{sprint_id}/burndown")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_points"] == 8
+    assert data["remaining_points"] == 8
+    assert data["completed_points"] == 0
+    # Ideal line: start=8, end=0 over 9 days
+    assert data["ideal_line"][0]["ideal"] == 8.0
+    assert data["ideal_line"][-1]["ideal"] == 0.0
+
+
+def test_sprint_burndown_completed_points(client: TestClient) -> None:
+    """Cards in the Done column count as completed."""
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = _create_sprint_with_dates(client, board_id, "2026-01-01", "2026-01-07", "Done Sprint")
+
+    # Get done column id
+    board = client.get(f"/api/board/{board_id}").json()
+    done_col = next(c for c in board["columns"] if c["key"] == "done")
+    done_col_id = done_col["id"]
+    backlog_col_id = board["columns"][0]["id"]
+
+    # Create card in backlog with sprint, then move to done
+    card = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": backlog_col_id, "title": "Done card", "details": "",
+              "estimate": 4, "sprint_id": sprint_id},
+    ).json()
+    client.post(
+        f"/api/boards/{board_id}/cards/{card['id']}/move",
+        json={"toColumnId": done_col_id, "toIndex": 0},
+    )
+
+    resp = client.get(f"/api/boards/{board_id}/sprints/{sprint_id}/burndown")
+    data = resp.json()
+    assert data["total_points"] == 4
+    assert data["completed_points"] == 4
+    assert data["remaining_points"] == 0
+
+
+def test_sprint_burndown_no_dates_returns_empty_ideal_line(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    resp = client.post(
+        f"/api/boards/{board_id}/sprints",
+        json={"name": "No Dates Sprint", "goal": ""},
+    )
+    sprint_id = resp.json()["id"]
+
+    resp = client.get(f"/api/boards/{board_id}/sprints/{sprint_id}/burndown")
+    assert resp.status_code == 200
+    assert resp.json()["ideal_line"] == []
+
+
+def test_sprint_burndown_today_in_response(client: TestClient) -> None:
+    import datetime
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = _create_sprint_with_dates(client, board_id, "2026-01-01", "2026-01-05", "Today Sprint")
+    resp = client.get(f"/api/boards/{board_id}/sprints/{sprint_id}/burndown")
+    assert resp.json()["today"] == datetime.date.today().isoformat()
+
+
+def test_sprint_burndown_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    resp = client.get(f"/api/boards/{board_id}/sprints/99999/burndown")
+    assert resp.status_code == 404
+
+
+def test_sprint_burndown_requires_auth(client: TestClient) -> None:
+    resp = client.get("/api/boards/1/sprints/1/burndown")
+    assert resp.status_code == 401

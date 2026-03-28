@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
 import bcrypt
+
+_MENTION_RE = re.compile(r"@(\w+)")
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -343,6 +346,20 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_time_logs_card_id ON time_logs(card_id);
             CREATE INDEX IF NOT EXISTS idx_time_logs_board_id ON time_logs(board_id);
+
+            CREATE TABLE IF NOT EXISTS notifications (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL,
+              type TEXT NOT NULL CHECK(type IN ('mention', 'assignment')),
+              entity_type TEXT NOT NULL,
+              entity_id INTEGER,
+              detail TEXT NOT NULL DEFAULT '',
+              is_read INTEGER NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id, is_read, created_at);
             """
         )
 
@@ -799,6 +816,8 @@ def create_card(
             assignee_id=assignee_id, estimate=estimate, sprint_id=sprint_id,
         )
         _log_activity_conn(connection, board_id, user_id, "create_card", "card", card_id, norm_title)
+        if assignee_id and assignee_id != user_id:
+            _notify_conn(connection, assignee_id, "assignment", "card", card_id, f"You were assigned to '{norm_title}'")
     return {
         "id": str(card_id),
         "columnId": str(column_id),
@@ -829,12 +848,19 @@ def update_card(
 ) -> dict[str, object]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
+        old = connection.execute(
+            "SELECT assignee_id FROM cards WHERE id = ? AND board_id = ?",
+            (card_id, board_id),
+        ).fetchone()
+        old_assignee_id = int(old["assignee_id"]) if old and old["assignee_id"] else None
         norm_title, norm_details = _update_card_conn(
             connection, board_id, card_id, title, details,
             due_date=due_date, priority=priority, labels=labels,
             assignee_id=assignee_id, estimate=estimate, sprint_id=sprint_id,
         )
         _log_activity_conn(connection, board_id, user_id, "update_card", "card", card_id, norm_title)
+        if assignee_id and assignee_id != old_assignee_id and assignee_id != user_id:
+            _notify_conn(connection, assignee_id, "assignment", "card", card_id, f"You were assigned to '{norm_title}'")
     return {
         "id": str(card_id),
         "title": norm_title,
@@ -1135,6 +1161,45 @@ def _log_activity_conn(
     )
 
 
+def _notify_conn(
+    connection: sqlite3.Connection,
+    user_id: int,
+    ntype: str,
+    entity_type: str,
+    entity_id: int | None,
+    detail: str,
+) -> None:
+    """Insert a notification row for a user."""
+    connection.execute(
+        "INSERT INTO notifications (user_id, type, entity_type, entity_id, detail) VALUES (?, ?, ?, ?, ?)",
+        (user_id, ntype, entity_type, entity_id, detail),
+    )
+
+
+def _handle_mentions_conn(
+    connection: sqlite3.Connection,
+    content: str,
+    card_id: int,
+    actor_user_id: int,
+) -> None:
+    """Parse @username mentions from content and notify each mentioned user."""
+    usernames = set(_MENTION_RE.findall(content))
+    for username in usernames:
+        row = connection.execute(
+            "SELECT id FROM users WHERE username = ? AND suspended = 0",
+            (username,),
+        ).fetchone()
+        if row and int(row["id"]) != actor_user_id:
+            _notify_conn(
+                connection,
+                int(row["id"]),
+                "mention",
+                "card",
+                card_id,
+                f"@{username} mentioned in a comment: {content[:120]}",
+            )
+
+
 def _move_card_conn(
     connection: sqlite3.Connection, board_id: int, card_id: int, to_column_id: int, to_index: int
 ) -> int:
@@ -1371,6 +1436,7 @@ def add_card_comment(user_id: int, board_id: int, card_id: int, content: str) ->
             (card_id, board_id, user_id, normalized),
         )
         comment_id = int(cursor.lastrowid or 0)
+        _handle_mentions_conn(connection, normalized, card_id, user_id)
         author_row = connection.execute(
             "SELECT username FROM users WHERE id = ?", (user_id,)
         ).fetchone()
@@ -2065,6 +2131,167 @@ def get_time_report(user_id: int, board_id: int) -> dict[str, object]:
             }
             for r in by_card
         ],
+    }
+
+
+def list_notifications(user_id: int) -> dict[str, object]:
+    """Return the 20 most recent notifications for user (unread first), plus unread count."""
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, type, entity_type, entity_id, detail, is_read, created_at
+            FROM notifications
+            WHERE user_id = ?
+            ORDER BY is_read ASC, created_at DESC
+            LIMIT 20
+            """,
+            (user_id,),
+        ).fetchall()
+        count_row = connection.execute(
+            "SELECT COUNT(*) AS cnt FROM notifications WHERE user_id = ? AND is_read = 0",
+            (user_id,),
+        ).fetchone()
+    return {
+        "notifications": [
+            {
+                "id": str(row["id"]),
+                "type": str(row["type"]),
+                "entity_type": str(row["entity_type"]),
+                "entity_id": str(row["entity_id"]) if row["entity_id"] is not None else None,
+                "detail": str(row["detail"]),
+                "is_read": bool(row["is_read"]),
+                "createdAt": str(row["created_at"]),
+            }
+            for row in rows
+        ],
+        "unread_count": int(count_row["cnt"]) if count_row else 0,
+    }
+
+
+def mark_notification_read(notification_id: int, user_id: int) -> None:
+    """Mark a single notification as read (only the owning user may do this)."""
+    with get_connection() as connection:
+        row = connection.execute(
+            "SELECT id FROM notifications WHERE id = ? AND user_id = ?",
+            (notification_id, user_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("Notification not found")
+        connection.execute(
+            "UPDATE notifications SET is_read = 1 WHERE id = ?",
+            (notification_id,),
+        )
+
+
+def mark_all_notifications_read(user_id: int) -> None:
+    """Mark all notifications for user as read."""
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE notifications SET is_read = 1 WHERE user_id = ?",
+            (user_id,),
+        )
+
+
+def copy_card(user_id: int, board_id: int, card_id: int) -> dict[str, object]:
+    """Duplicate a card in the same column, appending ' (copy)' to the title."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        original = connection.execute(
+            """
+            SELECT title, details, column_id, due_date, priority, labels,
+                   assignee_id, estimate, sprint_id
+            FROM cards WHERE id = ? AND board_id = ? AND archived = 0
+            """,
+            (card_id, board_id),
+        ).fetchone()
+        if original is None:
+            raise NotFoundError("Card not found")
+        raw_labels = original["labels"]
+        try:
+            labels = json.loads(raw_labels) if raw_labels else []
+        except (json.JSONDecodeError, TypeError):
+            labels = []
+        new_title = str(original["title"]) + " (copy)"
+        col_id = int(original["column_id"])
+        new_card_id, _, _ = _create_card_conn(
+            connection,
+            board_id,
+            col_id,
+            new_title,
+            str(original["details"]),
+            due_date=original["due_date"],
+            priority=original["priority"],
+            labels=labels,
+            assignee_id=int(original["assignee_id"]) if original["assignee_id"] else None,
+            estimate=int(original["estimate"]) if original["estimate"] else None,
+            sprint_id=int(original["sprint_id"]) if original["sprint_id"] else None,
+        )
+        _log_activity_conn(connection, board_id, user_id, "copy_card", "card", new_card_id, new_title)
+    return {
+        "id": str(new_card_id),
+        "columnId": str(col_id),
+        "title": new_title,
+    }
+
+
+def get_sprint_burndown(user_id: int, board_id: int, sprint_id: int) -> dict[str, object]:
+    """Return ideal burndown line and current remaining/completed story points."""
+    import datetime as _dt
+
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        sprint = connection.execute(
+            "SELECT id, name, goal, start_date, end_date, status FROM sprints WHERE id = ? AND board_id = ?",
+            (sprint_id, board_id),
+        ).fetchone()
+        if sprint is None:
+            raise NotFoundError("Sprint not found")
+
+        done_col = connection.execute(
+            "SELECT id FROM board_columns WHERE board_id = ? AND key = 'done'",
+            (board_id,),
+        ).fetchone()
+        done_col_id = int(done_col["id"]) if done_col else -1
+
+        sprint_cards = connection.execute(
+            "SELECT column_id, estimate FROM cards WHERE sprint_id = ? AND board_id = ? AND archived = 0",
+            (sprint_id, board_id),
+        ).fetchall()
+
+    total_points = sum(int(c["estimate"] or 0) for c in sprint_cards)
+    completed_points = sum(
+        int(c["estimate"] or 0) for c in sprint_cards if int(c["column_id"]) == done_col_id
+    )
+    remaining_points = total_points - completed_points
+
+    ideal_line: list[dict[str, object]] = []
+    if sprint["start_date"] and sprint["end_date"]:
+        try:
+            start = _dt.date.fromisoformat(sprint["start_date"])
+            end = _dt.date.fromisoformat(sprint["end_date"])
+            days = (end - start).days
+            if days > 0:
+                for i in range(days + 1):
+                    d = start + _dt.timedelta(days=i)
+                    ideal = round(total_points * (1 - i / days), 1)
+                    ideal_line.append({"date": d.isoformat(), "ideal": ideal})
+        except ValueError:
+            pass
+
+    return {
+        "sprint": {
+            "id": str(sprint["id"]),
+            "name": str(sprint["name"]),
+            "goal": str(sprint["goal"]),
+            "start_date": sprint["start_date"],
+            "end_date": sprint["end_date"],
+            "status": str(sprint["status"]),
+        },
+        "total_points": total_points,
+        "completed_points": completed_points,
+        "remaining_points": remaining_points,
+        "ideal_line": ideal_line,
+        "today": _dt.date.today().isoformat(),
     }
 
 

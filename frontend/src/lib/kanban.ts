@@ -26,6 +26,25 @@ export type Card = {
   total_minutes?: number;
 };
 
+export type Notification = {
+  id: string;
+  type: "mention" | "assignment";
+  entity_type: string;
+  entity_id: string | null;
+  detail: string;
+  is_read: boolean;
+  createdAt: string;
+};
+
+export type BurndownData = {
+  sprint: Sprint;
+  total_points: number;
+  completed_points: number;
+  remaining_points: number;
+  ideal_line: { date: string; ideal: number }[];
+  today: string;
+};
+
 export type TimeLog = {
   id: string;
   minutes: number;
