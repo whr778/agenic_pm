@@ -2075,3 +2075,283 @@ def test_dependency_activity_logged(client: TestClient) -> None:
 
     log = client.get(f"/api/boards/{board_id}/activity").json()
     assert any(e["action"] == "add_dependency" for e in log)
+
+
+# ── Sprint tests ──────────────────────────────────────────────────────────────
+
+def _get_col_id(client: TestClient, board_id: str) -> str:
+    return client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+
+def test_list_sprints_empty(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.get(f"/api/boards/{board_id}/sprints")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_create_sprint(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.post(
+        f"/api/boards/{board_id}/sprints",
+        json={"name": "Sprint 1", "goal": "Ship MVP", "start_date": "2026-04-01", "end_date": "2026-04-14"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "Sprint 1"
+    assert data["goal"] == "Ship MVP"
+    assert data["status"] == "planning"
+    assert data["start_date"] == "2026-04-01"
+    assert data["end_date"] == "2026-04-14"
+
+
+def test_create_sprint_minimal(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Minimal Sprint"})
+    assert response.status_code == 200
+    assert response.json()["name"] == "Minimal Sprint"
+
+
+def test_create_sprint_duplicate_name_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    client.post(f"/api/boards/{board_id}/sprints", json={"name": "Dup Sprint"})
+    response = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Dup Sprint"})
+    assert response.status_code == 400
+
+
+def test_list_sprints_populated(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    client.post(f"/api/boards/{board_id}/sprints", json={"name": "S1"})
+    client.post(f"/api/boards/{board_id}/sprints", json={"name": "S2"})
+    sprints = client.get(f"/api/boards/{board_id}/sprints").json()
+    assert len(sprints) == 2
+    assert {s["name"] for s in sprints} == {"S1", "S2"}
+
+
+def test_update_sprint(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Old Name"}).json()["id"]
+    response = client.put(
+        f"/api/boards/{board_id}/sprints/{sprint_id}",
+        json={"name": "New Name", "goal": "Updated goal"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["name"] == "New Name"
+    assert data["goal"] == "Updated goal"
+
+
+def test_update_sprint_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.put(f"/api/boards/{board_id}/sprints/99999", json={"name": "X"})
+    assert response.status_code == 404
+
+
+def test_update_sprint_duplicate_name_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    client.post(f"/api/boards/{board_id}/sprints", json={"name": "A"})
+    sid_b = client.post(f"/api/boards/{board_id}/sprints", json={"name": "B"}).json()["id"]
+    response = client.put(f"/api/boards/{board_id}/sprints/{sid_b}", json={"name": "A"})
+    assert response.status_code == 400
+
+
+def test_delete_sprint_planning(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Delete Me"}).json()["id"]
+    response = client.delete(f"/api/boards/{board_id}/sprints/{sprint_id}")
+    assert response.status_code == 200
+    assert client.get(f"/api/boards/{board_id}/sprints").json() == []
+
+
+def test_delete_sprint_active_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Active S"}).json()["id"]
+    client.post(f"/api/boards/{board_id}/sprints/{sprint_id}/start")
+    response = client.delete(f"/api/boards/{board_id}/sprints/{sprint_id}")
+    assert response.status_code == 400
+
+
+def test_delete_sprint_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.delete(f"/api/boards/{board_id}/sprints/99999")
+    assert response.status_code == 404
+
+
+def test_start_sprint(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "To Start"}).json()["id"]
+    response = client.post(f"/api/boards/{board_id}/sprints/{sprint_id}/start")
+    assert response.status_code == 200
+    assert response.json()["status"] == "active"
+
+
+def test_start_non_planning_sprint_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "S"}).json()["id"]
+    client.post(f"/api/boards/{board_id}/sprints/{sprint_id}/start")
+    # Try to start it again
+    response = client.post(f"/api/boards/{board_id}/sprints/{sprint_id}/start")
+    assert response.status_code == 400
+
+
+def test_only_one_active_sprint_per_board(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    s1 = client.post(f"/api/boards/{board_id}/sprints", json={"name": "S1"}).json()["id"]
+    s2 = client.post(f"/api/boards/{board_id}/sprints", json={"name": "S2"}).json()["id"]
+    client.post(f"/api/boards/{board_id}/sprints/{s1}/start")
+    response = client.post(f"/api/boards/{board_id}/sprints/{s2}/start")
+    assert response.status_code == 400
+    assert "active" in response.json()["detail"].lower()
+
+
+def test_complete_sprint(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "To Complete"}).json()["id"]
+    client.post(f"/api/boards/{board_id}/sprints/{sprint_id}/start")
+    response = client.post(f"/api/boards/{board_id}/sprints/{sprint_id}/complete")
+    assert response.status_code == 200
+    assert response.json()["status"] == "completed"
+
+
+def test_complete_non_active_sprint_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "S"}).json()["id"]
+    response = client.post(f"/api/boards/{board_id}/sprints/{sprint_id}/complete")
+    assert response.status_code == 400
+
+
+def test_update_completed_sprint_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sid = client.post(f"/api/boards/{board_id}/sprints", json={"name": "S"}).json()["id"]
+    client.post(f"/api/boards/{board_id}/sprints/{sid}/start")
+    client.post(f"/api/boards/{board_id}/sprints/{sid}/complete")
+    response = client.put(f"/api/boards/{board_id}/sprints/{sid}", json={"name": "New"})
+    assert response.status_code == 400
+
+
+def test_get_sprint_stats(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_col_id(client, board_id)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Stats Sprint"}).json()["id"]
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Card A", "details": "", "estimate": 3, "sprint_id": sprint_id},
+    )
+    client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Card B", "details": "", "estimate": 5, "sprint_id": sprint_id},
+    )
+    response = client.get(f"/api/boards/{board_id}/sprints/{sprint_id}/stats")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["total_cards"] == 2
+    assert data["total_estimate"] == 8
+
+
+def test_get_sprint_stats_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.get(f"/api/boards/{board_id}/sprints/99999/stats")
+    assert response.status_code == 404
+
+
+def test_assign_card_to_sprint(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_col_id(client, board_id)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Sprint X"}).json()["id"]
+    card_id = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Sprint Card", "details": "", "sprint_id": sprint_id},
+    ).json()["id"]
+    board = client.get(f"/api/board/{board_id}").json()
+    card = board["cards"][str(card_id)]
+    assert card["sprint_id"] == str(sprint_id)
+    assert card["sprint_name"] == "Sprint X"
+
+
+def test_update_card_sprint_assignment(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_col_id(client, board_id)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Sprint Y"}).json()["id"]
+    card_id = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Card", "details": ""},
+    ).json()["id"]
+    client.put(
+        f"/api/boards/{board_id}/cards/{card_id}",
+        json={"title": "Card", "details": "", "sprint_id": sprint_id},
+    )
+    board = client.get(f"/api/board/{board_id}").json()
+    assert board["cards"][str(card_id)]["sprint_id"] == str(sprint_id)
+
+
+def test_delete_sprint_unassigns_cards(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    col_id = _get_col_id(client, board_id)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "To Delete"}).json()["id"]
+    card_id = client.post(
+        f"/api/boards/{board_id}/cards",
+        json={"columnId": col_id, "title": "Card", "details": "", "sprint_id": sprint_id},
+    ).json()["id"]
+    client.delete(f"/api/boards/{board_id}/sprints/{sprint_id}")
+    board = client.get(f"/api/board/{board_id}").json()
+    assert board["cards"][str(card_id)]["sprint_id"] is None
+
+
+def test_sprint_requires_auth(client: TestClient) -> None:
+    response = client.get("/api/boards/1/sprints")
+    assert response.status_code == 401
+
+
+def test_start_sprint_requires_auth(client: TestClient) -> None:
+    response = client.post("/api/boards/1/sprints/1/start")
+    assert response.status_code == 401
+
+
+def test_complete_sprint_requires_auth(client: TestClient) -> None:
+    response = client.post("/api/boards/1/sprints/1/complete")
+    assert response.status_code == 401
+
+
+def test_sprint_activity_logged(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sprint_id = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Log Sprint"}).json()["id"]
+    client.post(f"/api/boards/{board_id}/sprints/{sprint_id}/start")
+    client.post(f"/api/boards/{board_id}/sprints/{sprint_id}/complete")
+    log = client.get(f"/api/boards/{board_id}/activity").json()
+    actions = {e["action"] for e in log}
+    assert "create_sprint" in actions
+    assert "start_sprint" in actions
+    assert "complete_sprint" in actions
+
+
+def test_delete_completed_sprint(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    sid = client.post(f"/api/boards/{board_id}/sprints", json={"name": "Done Sprint"}).json()["id"]
+    client.post(f"/api/boards/{board_id}/sprints/{sid}/start")
+    client.post(f"/api/boards/{board_id}/sprints/{sid}/complete")
+    response = client.delete(f"/api/boards/{board_id}/sprints/{sid}")
+    assert response.status_code == 200

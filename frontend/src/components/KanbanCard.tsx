@@ -2,7 +2,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import clsx from "clsx";
 import { useEffect, useRef, useState } from "react";
-import type { AssignableUser, Card, CardDependency, ChecklistItem, Comment, Priority } from "@/lib/kanban";
+import type { AssignableUser, Card, CardDependency, ChecklistItem, Comment, Priority, Sprint } from "@/lib/kanban";
 
 export type MoveDirection = "up" | "down" | "left" | "right";
 
@@ -11,6 +11,7 @@ type KanbanCardProps = {
   boardId: string;
   assignableUsers: AssignableUser[];
   boardCards: Record<string, Card>;
+  sprints: Sprint[];
   onArchive: (cardId: string) => void;
   onEdit: (
     cardId: string,
@@ -21,6 +22,7 @@ type KanbanCardProps = {
     labels: string[],
     assignee_id: string | null,
     estimate: number | null,
+    sprint_id: string | null,
   ) => void;
   onMove?: (cardId: string, direction: MoveDirection) => void;
   canMove?: { up: boolean; down: boolean; left: boolean; right: boolean };
@@ -80,6 +82,7 @@ export const KanbanCard = ({
   boardId,
   assignableUsers,
   boardCards,
+  sprints,
   onArchive,
   onEdit,
   onMove,
@@ -95,6 +98,7 @@ export const KanbanCard = ({
   const [draftLabels, setDraftLabels] = useState((card.labels ?? []).join(", "));
   const [draftAssigneeId, setDraftAssigneeId] = useState(card.assignee_id ?? "");
   const [draftEstimate, setDraftEstimate] = useState(card.estimate != null ? String(card.estimate) : "");
+  const [draftSprintId, setDraftSprintId] = useState(card.sprint_id ?? "");
   const [titleError, setTitleError] = useState(false);
 
   // Checklist state
@@ -131,7 +135,8 @@ export const KanbanCard = ({
     setDraftLabels((card.labels ?? []).join(", "));
     setDraftAssigneeId(card.assignee_id ?? "");
     setDraftEstimate(card.estimate != null ? String(card.estimate) : "");
-  }, [card.title, card.details, card.due_date, card.priority, card.labels, card.assignee_id, card.estimate]);
+    setDraftSprintId(card.sprint_id ?? "");
+  }, [card.title, card.details, card.due_date, card.priority, card.labels, card.assignee_id, card.estimate, card.sprint_id]);
 
   useEffect(() => {
     if (showDeps && !depsLoaded) {
@@ -206,7 +211,8 @@ export const KanbanCard = ({
     const parsedEstimate = draftEstimate.trim() !== "" ? parseInt(draftEstimate, 10) : null;
     const estimate = parsedEstimate !== null && !isNaN(parsedEstimate) && parsedEstimate >= 0 ? parsedEstimate : null;
 
-    onEdit(card.id, title, details, due_date, priority, labels, assignee_id, estimate);
+    const sprint_id = draftSprintId || null;
+    onEdit(card.id, title, details, due_date, priority, labels, assignee_id, estimate, sprint_id);
     setIsEditing(false);
   };
 
@@ -218,6 +224,7 @@ export const KanbanCard = ({
     setDraftLabels((card.labels ?? []).join(", "));
     setDraftAssigneeId(card.assignee_id ?? "");
     setDraftEstimate(card.estimate != null ? String(card.estimate) : "");
+    setDraftSprintId(card.sprint_id ?? "");
     setTitleError(false);
     setIsEditing(false);
   };
@@ -457,6 +464,22 @@ export const KanbanCard = ({
                 aria-label="Estimate"
               />
             </div>
+            {sprints.length > 0 && (
+              <div>
+                <label className="block text-xs font-semibold text-[var(--gray-text)]">Sprint</label>
+                <select
+                  value={draftSprintId}
+                  onChange={(e) => setDraftSprintId(e.target.value)}
+                  className="w-full rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs text-[var(--navy-dark)] outline-none"
+                  aria-label="Sprint"
+                >
+                  <option value="">No sprint</option>
+                  {sprints.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name} ({s.status})</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <button
                 type="button"
@@ -534,6 +557,14 @@ export const KanbanCard = ({
                     data-testid={`card-estimate-${card.id}`}
                   >
                     {card.estimate} pts
+                  </span>
+                )}
+                {card.sprint_name && (
+                  <span
+                    className="rounded-full bg-[var(--accent-yellow)]/20 px-2 py-0.5 text-xs font-semibold text-[var(--navy-dark)]"
+                    data-testid={`card-sprint-${card.id}`}
+                  >
+                    {card.sprint_name}
                   </span>
                 )}
                 {checklist.length > 0 && !showChecklist && (

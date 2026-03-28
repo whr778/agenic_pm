@@ -25,6 +25,7 @@ import {
   type BoardStats,
   type Column,
   type Priority,
+  type Sprint,
 } from "@/lib/kanban";
 import type { MoveDirection } from "@/components/KanbanCard";
 
@@ -61,6 +62,16 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
   const [showActivity, setShowActivity] = useState(false);
   const [activityLog, setActivityLog] = useState<ActivityEntry[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
+
+  // Sprint management
+  const [sprints, setSprints] = useState<Sprint[]>([]);
+  const [showSprints, setShowSprints] = useState(false);
+  const [filterSprint, setFilterSprint] = useState("");
+  const [newSprintName, setNewSprintName] = useState("");
+  const [newSprintGoal, setNewSprintGoal] = useState("");
+  const [newSprintStart, setNewSprintStart] = useState("");
+  const [newSprintEnd, setNewSprintEnd] = useState("");
+  const [sprintFormError, setSprintFormError] = useState<string | null>(null);
 
   // Keyboard shortcuts overlay
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -141,6 +152,16 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     }
   }, [boardId]);
 
+  const loadSprints = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const response = await apiRef.current(`/api/boards/${boardId}/sprints`, { method: "GET", signal });
+      const payload = (await response.json()) as Sprint[];
+      if (!signal?.aborted) setSprints(payload);
+    } catch {
+      if (!signal?.aborted) setSprints([]);
+    }
+  }, [boardId]);
+
   useEffect(() => {
     const controller = new AbortController();
     abortRef.current = controller;
@@ -149,9 +170,10 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
       loadChat(controller.signal),
       loadUsers(controller.signal),
       loadStats(controller.signal),
+      loadSprints(controller.signal),
     ]);
     return () => controller.abort();
-  }, [loadBoard, loadChat, loadUsers, loadStats]);
+  }, [loadBoard, loadChat, loadUsers, loadStats, loadSprints]);
 
   useEffect(() => {
     setBoardNameDraft(board?.name ?? initialData.name);
@@ -215,7 +237,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     if (!board) return [];
     const textLower = filterText.trim().toLowerCase();
     const labelLower = filterLabel.trim().toLowerCase();
-    const hasFilters = textLower || filterPriority || labelLower || filterAssignee;
+    const hasFilters = textLower || filterPriority || labelLower || filterAssignee || filterSprint;
     if (!hasFilters) return board.columns;
 
     return board.columns.map((col) => {
@@ -226,13 +248,14 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
         if (filterPriority && card.priority !== filterPriority) return false;
         if (labelLower && !(card.labels ?? []).some((l) => l.toLowerCase().includes(labelLower))) return false;
         if (filterAssignee && card.assignee_id !== filterAssignee) return false;
+        if (filterSprint && card.sprint_id !== filterSprint) return false;
         return true;
       });
       return { ...col, cardIds: filteredIds };
     });
-  }, [board, filterText, filterPriority, filterLabel, filterAssignee]);
+  }, [board, filterText, filterPriority, filterLabel, filterAssignee, filterSprint]);
 
-  const hasActiveFilters = filterText || filterPriority || filterLabel || filterAssignee;
+  const hasActiveFilters = filterText || filterPriority || filterLabel || filterAssignee || filterSprint;
 
   const handleDragStart = (event: DragStartEvent) => {
     setActiveCardId(event.active.id as string);
@@ -396,15 +419,65 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     labels: string[],
     assignee_id: string | null,
     estimate: number | null,
+    sprint_id: string | null,
   ) => {
     try {
       await apiRef.current(`/api/boards/${boardId}/cards/${cardId}`, {
         method: "PUT",
-        body: JSON.stringify({ title, details, due_date, priority, labels, assignee_id, estimate }),
+        body: JSON.stringify({ title, details, due_date, priority, labels, assignee_id, estimate, sprint_id }),
       });
       await Promise.all([loadBoard(), loadStats()]);
     } catch (editError) {
       setError(editError instanceof Error ? editError.message : "Unable to edit card");
+    }
+  };
+
+  const handleCreateSprint = async () => {
+    const name = newSprintName.trim();
+    if (!name) { setSprintFormError("Sprint name is required"); return; }
+    setSprintFormError(null);
+    try {
+      await apiRef.current(`/api/boards/${boardId}/sprints`, {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          goal: newSprintGoal.trim(),
+          start_date: newSprintStart || null,
+          end_date: newSprintEnd || null,
+        }),
+      });
+      setNewSprintName(""); setNewSprintGoal(""); setNewSprintStart(""); setNewSprintEnd("");
+      await loadSprints();
+    } catch (err) {
+      setSprintFormError(err instanceof Error ? err.message : "Failed to create sprint");
+    }
+  };
+
+  const handleStartSprint = async (sprintId: string) => {
+    try {
+      await apiRef.current(`/api/boards/${boardId}/sprints/${sprintId}/start`, { method: "POST" });
+      await loadSprints();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start sprint");
+    }
+  };
+
+  const handleCompleteSprint = async (sprintId: string) => {
+    try {
+      await apiRef.current(`/api/boards/${boardId}/sprints/${sprintId}/complete`, { method: "POST" });
+      await loadSprints();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to complete sprint");
+    }
+  };
+
+  const handleDeleteSprint = async (sprintId: string) => {
+    try {
+      await apiRef.current(`/api/boards/${boardId}/sprints/${sprintId}`, { method: "DELETE" });
+      if (filterSprint === sprintId) setFilterSprint("");
+      await Promise.all([loadSprints(), loadBoard()]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete sprint");
     }
   };
 
@@ -631,6 +704,15 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
             </button>
             <button
               type="button"
+              onClick={() => setShowSprints((v) => !v)}
+              className={`rounded-xl border px-3 py-2 text-sm font-semibold transition ${showSprints ? "border-[var(--accent-yellow)] bg-[var(--accent-yellow)]/10 text-[var(--navy-dark)]" : "border-[var(--stroke)] text-[var(--gray-text)] hover:text-[var(--navy-dark)]"}`}
+              aria-label="Toggle sprint management"
+              data-testid="sprints-toggle"
+            >
+              Sprints
+            </button>
+            <button
+              type="button"
               onClick={() => setShowShortcuts(true)}
               className="ml-auto rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm font-semibold text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
               aria-label="Show keyboard shortcuts"
@@ -682,6 +764,20 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                 ))}
               </select>
             )}
+            {sprints.length > 0 && (
+              <select
+                value={filterSprint}
+                onChange={(e) => setFilterSprint(e.target.value)}
+                className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none"
+                aria-label="Filter by sprint"
+                data-testid="filter-sprint"
+              >
+                <option value="">All sprints</option>
+                {sprints.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            )}
             {hasActiveFilters && (
               <button
                 type="button"
@@ -690,6 +786,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                   setFilterPriority("");
                   setFilterLabel("");
                   setFilterAssignee("");
+                  setFilterSprint("");
                 }}
                 className="rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm font-semibold text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
                 aria-label="Clear filters"
@@ -715,6 +812,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                   boardId={boardId}
                   assignableUsers={assignableUsers}
                   boardCards={safeBoard.cards}
+                  sprints={sprints}
                   cards={column.cardIds.map((cardId) => safeBoard.cards[cardId]).filter(Boolean)}
                   isFirstColumn={colIdx === 0}
                   isLastColumn={colIdx === safeBoard.columns.length - 1}
@@ -859,6 +957,143 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                         {entry.action.replace(/_/g, " ")}
                         {entry.detail ? `: ${entry.detail}` : ""}
                       </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
+
+          {/* Sprint management panel */}
+          {showSprints && (
+            <section
+              className="rounded-[28px] border border-[var(--stroke)] bg-white/90 p-6 shadow-[var(--shadow)]"
+              data-testid="sprints-panel"
+            >
+              <h2 className="font-display text-xl font-semibold text-[var(--navy-dark)]">Sprint Management</h2>
+
+              {/* Create sprint form */}
+              <div className="mt-4 grid gap-3 rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] p-4 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--gray-text)]">Sprint name</label>
+                  <input
+                    value={newSprintName}
+                    onChange={(e) => setNewSprintName(e.target.value)}
+                    placeholder="Sprint 1"
+                    maxLength={256}
+                    className="mt-1 w-full rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none"
+                    aria-label="New sprint name"
+                    data-testid="sprint-name-input"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--gray-text)]">Goal</label>
+                  <input
+                    value={newSprintGoal}
+                    onChange={(e) => setNewSprintGoal(e.target.value)}
+                    placeholder="What is the sprint goal?"
+                    maxLength={1000}
+                    className="mt-1 w-full rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none"
+                    aria-label="New sprint goal"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--gray-text)]">Start date</label>
+                  <input
+                    type="date"
+                    value={newSprintStart}
+                    onChange={(e) => setNewSprintStart(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none"
+                    aria-label="Sprint start date"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-[var(--gray-text)]">End date</label>
+                  <input
+                    type="date"
+                    value={newSprintEnd}
+                    onChange={(e) => setNewSprintEnd(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm outline-none"
+                    aria-label="Sprint end date"
+                  />
+                </div>
+                {sprintFormError && (
+                  <p className="col-span-2 text-xs text-red-600" role="alert">{sprintFormError}</p>
+                )}
+                <div className="col-span-2">
+                  <button
+                    type="button"
+                    onClick={() => void handleCreateSprint()}
+                    className="rounded-xl bg-[var(--accent-yellow)] px-4 py-2 text-sm font-semibold text-[var(--navy-dark)]"
+                    data-testid="create-sprint-btn"
+                  >
+                    Create sprint
+                  </button>
+                </div>
+              </div>
+
+              {/* Sprint list */}
+              {sprints.length === 0 ? (
+                <p className="mt-4 text-sm text-[var(--gray-text)]">No sprints yet.</p>
+              ) : (
+                <ul className="mt-4 space-y-3">
+                  {sprints.map((sprint) => (
+                    <li
+                      key={sprint.id}
+                      className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[var(--stroke)] bg-[var(--surface)] px-4 py-3"
+                      data-testid={`sprint-${sprint.id}`}
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <p className="font-semibold text-[var(--navy-dark)]">{sprint.name}</p>
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${sprint.status === "active" ? "bg-green-100 text-green-700" : sprint.status === "completed" ? "bg-gray-100 text-gray-500" : "bg-blue-100 text-blue-700"}`}>
+                            {sprint.status}
+                          </span>
+                        </div>
+                        {sprint.goal && (
+                          <p className="text-xs text-[var(--gray-text)]">{sprint.goal}</p>
+                        )}
+                        {(sprint.start_date || sprint.end_date) && (
+                          <p className="text-xs text-[var(--gray-text)]">
+                            {sprint.start_date ?? "?"} &ndash; {sprint.end_date ?? "?"}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {sprint.status === "planning" && (
+                          <button
+                            type="button"
+                            onClick={() => void handleStartSprint(sprint.id)}
+                            className="rounded-xl border border-green-300 px-3 py-1.5 text-xs font-semibold text-green-700 hover:bg-green-50"
+                            aria-label={`Start sprint ${sprint.name}`}
+                            data-testid={`start-sprint-${sprint.id}`}
+                          >
+                            Start
+                          </button>
+                        )}
+                        {sprint.status === "active" && (
+                          <button
+                            type="button"
+                            onClick={() => void handleCompleteSprint(sprint.id)}
+                            className="rounded-xl border border-[var(--primary-blue)] px-3 py-1.5 text-xs font-semibold text-[var(--primary-blue)] hover:bg-[var(--primary-blue)]/10"
+                            aria-label={`Complete sprint ${sprint.name}`}
+                            data-testid={`complete-sprint-${sprint.id}`}
+                          >
+                            Complete
+                          </button>
+                        )}
+                        {sprint.status !== "active" && (
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteSprint(sprint.id)}
+                            className="rounded-xl border border-red-200 px-3 py-1.5 text-xs font-semibold text-red-600 hover:bg-red-50"
+                            aria-label={`Delete sprint ${sprint.name}`}
+                            data-testid={`delete-sprint-${sprint.id}`}
+                          >
+                            Delete
+                          </button>
+                        )}
+                      </div>
                     </li>
                   ))}
                 </ul>

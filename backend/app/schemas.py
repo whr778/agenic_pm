@@ -28,6 +28,7 @@ class CreateCardPayload(BaseModel):
     labels: list[str] = Field(default_factory=list)
     assignee_id: str | None = Field(default=None, max_length=20)
     estimate: int | None = Field(default=None, ge=0)
+    sprint_id: str | None = Field(default=None, max_length=20)
 
 
 class UpdateCardPayload(BaseModel):
@@ -38,6 +39,7 @@ class UpdateCardPayload(BaseModel):
     labels: list[str] = Field(default_factory=list)
     assignee_id: str | None = Field(default=None, max_length=20)
     estimate: int | None = Field(default=None, ge=0)
+    sprint_id: str | None = Field(default=None, max_length=20)
 
 
 class MoveCardPayload(BaseModel):
@@ -92,3 +94,21 @@ class UpdateChecklistItemPayload(BaseModel):
 class AddDependencyPayload(BaseModel):
     blocker_id: str = Field(max_length=20)
     blocked_id: str = Field(max_length=20)
+
+
+class CreateSprintPayload(BaseModel):
+    name: str = Field(max_length=256)
+    goal: str = Field(default="", max_length=1000)
+    start_date: str | None = Field(default=None, max_length=10)  # YYYY-MM-DD
+    end_date: str | None = Field(default=None, max_length=10)
+
+
+class UpdateSprintPayload(BaseModel):
+    name: str | None = Field(default=None, max_length=256)
+    goal: str | None = Field(default=None, max_length=1000)
+    start_date: str | None = Field(default=None, max_length=10)
+    end_date: str | None = Field(default=None, max_length=10)
+
+
+class AssignCardSprintPayload(BaseModel):
+    sprint_id: str | None = Field(default=None, max_length=20)

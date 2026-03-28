@@ -140,7 +140,7 @@ def _migrate_boards_unique_constraint(connection: sqlite3.Connection) -> None:
 
 
 def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
-    """Add due_date, priority, labels, assignee_id, archived, and estimate columns to existing cards table."""
+    """Add due_date, priority, labels, assignee_id, archived, estimate, and sprint_id columns to existing cards table."""
     columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(cards)").fetchall()
@@ -157,6 +157,8 @@ def _migrate_cards_add_columns(connection: sqlite3.Connection) -> None:
         connection.execute("ALTER TABLE cards ADD COLUMN archived INTEGER NOT NULL DEFAULT 0")
     if "estimate" not in columns:
         connection.execute("ALTER TABLE cards ADD COLUMN estimate INTEGER")
+    if "sprint_id" not in columns:
+        connection.execute("ALTER TABLE cards ADD COLUMN sprint_id INTEGER REFERENCES sprints(id) ON DELETE SET NULL")
 
 
 def init_db() -> None:
@@ -208,6 +210,7 @@ def init_db() -> None:
               assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
               archived INTEGER NOT NULL DEFAULT 0,
               estimate INTEGER,
+              sprint_id INTEGER REFERENCES sprints(id) ON DELETE SET NULL,
               created_at TEXT NOT NULL DEFAULT (datetime('now')),
               updated_at TEXT NOT NULL DEFAULT (datetime('now')),
               FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE,
@@ -300,6 +303,22 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_card_deps_blocker ON card_dependencies(blocker_id);
             CREATE INDEX IF NOT EXISTS idx_card_deps_blocked ON card_dependencies(blocked_id);
+
+            CREATE TABLE IF NOT EXISTS sprints (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              board_id INTEGER NOT NULL,
+              name TEXT NOT NULL,
+              goal TEXT NOT NULL DEFAULT '',
+              start_date TEXT,
+              end_date TEXT,
+              status TEXT NOT NULL DEFAULT 'planning',
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE,
+              UNIQUE(board_id, name)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_sprints_board_id ON sprints(board_id);
             """
         )
 
@@ -631,14 +650,16 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
         card_rows = connection.execute(
             """
             SELECT c.id, c.column_id, c.title, c.details, c.position,
-                   c.due_date, c.priority, c.labels, c.assignee_id, c.estimate,
+                   c.due_date, c.priority, c.labels, c.assignee_id, c.estimate, c.sprint_id,
                    u.username AS assignee_username,
+                   s.name AS sprint_name,
                    EXISTS(
                      SELECT 1 FROM card_dependencies cd
                      WHERE cd.blocked_id = c.id AND cd.board_id = c.board_id
                    ) AS is_blocked
             FROM cards c
             LEFT JOIN users u ON c.assignee_id = u.id
+            LEFT JOIN sprints s ON c.sprint_id = s.id
             WHERE c.board_id = ? AND c.archived = 0
             ORDER BY c.column_id ASC, c.position ASC
             """,
@@ -670,6 +691,8 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
                 "assignee_username": card["assignee_username"],
                 "estimate": int(card["estimate"]) if card["estimate"] is not None else None,
                 "is_blocked": bool(card["is_blocked"]),
+                "sprint_id": str(card["sprint_id"]) if card["sprint_id"] else None,
+                "sprint_name": card["sprint_name"],
             }
 
         columns_payload = [
@@ -717,13 +740,14 @@ def create_card(
     labels: list[str] | None = None,
     assignee_id: int | None = None,
     estimate: int | None = None,
+    sprint_id: int | None = None,
 ) -> dict[str, object]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
         card_id, norm_title, norm_details = _create_card_conn(
             connection, board_id, column_id, title, details,
             due_date=due_date, priority=priority, labels=labels,
-            assignee_id=assignee_id, estimate=estimate,
+            assignee_id=assignee_id, estimate=estimate, sprint_id=sprint_id,
         )
         _log_activity_conn(connection, board_id, user_id, "create_card", "card", card_id, norm_title)
     return {
@@ -736,6 +760,7 @@ def create_card(
         "labels": labels or [],
         "assignee_id": str(assignee_id) if assignee_id else None,
         "estimate": estimate,
+        "sprint_id": str(sprint_id) if sprint_id else None,
     }
 
 
@@ -751,13 +776,14 @@ def update_card(
     labels: list[str] | None = None,
     assignee_id: int | None = None,
     estimate: int | None = None,
+    sprint_id: int | None = None,
 ) -> dict[str, object]:
     with get_connection() as connection:
         _get_board(connection, user_id, board_id)
         norm_title, norm_details = _update_card_conn(
             connection, board_id, card_id, title, details,
             due_date=due_date, priority=priority, labels=labels,
-            assignee_id=assignee_id, estimate=estimate,
+            assignee_id=assignee_id, estimate=estimate, sprint_id=sprint_id,
         )
         _log_activity_conn(connection, board_id, user_id, "update_card", "card", card_id, norm_title)
     return {
@@ -769,6 +795,7 @@ def update_card(
         "labels": labels or [],
         "assignee_id": str(assignee_id) if assignee_id else None,
         "estimate": estimate,
+        "sprint_id": str(sprint_id) if sprint_id else None,
     }
 
 
@@ -937,6 +964,7 @@ def _create_card_conn(
     labels: list[str] | None = None,
     assignee_id: int | None = None,
     estimate: int | None = None,
+    sprint_id: int | None = None,
 ) -> tuple[int, str, str]:
     normalized_title = _normalize_non_empty(title, "Card title")
     normalized_details = details.strip()
@@ -957,10 +985,10 @@ def _create_card_conn(
     labels_json = json.dumps(labels or [])
     cursor = connection.execute(
         """
-        INSERT INTO cards (board_id, column_id, title, details, position, due_date, priority, labels, assignee_id, estimate)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO cards (board_id, column_id, title, details, position, due_date, priority, labels, assignee_id, estimate, sprint_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (board_id, column_id, normalized_title, normalized_details, position, due_date, priority, labels_json, assignee_id, estimate),
+        (board_id, column_id, normalized_title, normalized_details, position, due_date, priority, labels_json, assignee_id, estimate, sprint_id),
     )
     return int(cursor.lastrowid or 0), normalized_title, normalized_details
 
@@ -977,6 +1005,7 @@ def _update_card_conn(
     labels: list[str] | None = None,
     assignee_id: int | None = None,
     estimate: int | None = None,
+    sprint_id: int | None = None,
 ) -> tuple[str, str]:
     normalized_title = _normalize_non_empty(title, "Card title")
     normalized_details = details.strip()
@@ -993,10 +1022,10 @@ def _update_card_conn(
         """
         UPDATE cards
         SET title = ?, details = ?, due_date = ?, priority = ?, labels = ?,
-            assignee_id = ?, estimate = ?, updated_at = datetime('now')
+            assignee_id = ?, estimate = ?, sprint_id = ?, updated_at = datetime('now')
         WHERE id = ?
         """,
-        (normalized_title, normalized_details, due_date, priority, labels_json, assignee_id, estimate, card_id),
+        (normalized_title, normalized_details, due_date, priority, labels_json, assignee_id, estimate, sprint_id, card_id),
     )
     return normalized_title, normalized_details
 
@@ -1632,6 +1661,225 @@ def remove_card_dependency(user_id: int, board_id: int, dep_id: int) -> None:
             connection, board_id, user_id, "remove_dependency", "card", int(row["blocker_id"]),
         )
         connection.execute("DELETE FROM card_dependencies WHERE id = ?", (dep_id,))
+
+
+def _get_sprint(connection: sqlite3.Connection, board_id: int, sprint_id: int) -> sqlite3.Row:
+    row = connection.execute(
+        "SELECT id, name, goal, start_date, end_date, status FROM sprints WHERE id = ? AND board_id = ?",
+        (sprint_id, board_id),
+    ).fetchone()
+    if row is None:
+        raise NotFoundError("Sprint not found")
+    return row
+
+
+def list_sprints(user_id: int, board_id: int) -> list[dict[str, object]]:
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        rows = connection.execute(
+            """
+            SELECT id, name, goal, start_date, end_date, status, created_at
+            FROM sprints WHERE board_id = ?
+            ORDER BY id ASC
+            """,
+            (board_id,),
+        ).fetchall()
+    return [
+        {
+            "id": str(row["id"]),
+            "name": str(row["name"]),
+            "goal": str(row["goal"]),
+            "start_date": row["start_date"],
+            "end_date": row["end_date"],
+            "status": str(row["status"]),
+            "createdAt": str(row["created_at"]),
+        }
+        for row in rows
+    ]
+
+
+def create_sprint(
+    user_id: int,
+    board_id: int,
+    name: str,
+    goal: str = "",
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, object]:
+    normalized_name = _normalize_non_empty(name, "Sprint name")
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        existing = connection.execute(
+            "SELECT id FROM sprints WHERE board_id = ? AND name = ?",
+            (board_id, normalized_name),
+        ).fetchone()
+        if existing is not None:
+            raise ValidationError("A sprint with that name already exists")
+        cursor = connection.execute(
+            """
+            INSERT INTO sprints (board_id, name, goal, start_date, end_date)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (board_id, normalized_name, goal.strip(), start_date, end_date),
+        )
+        sprint_id = int(cursor.lastrowid or 0)
+        _log_activity_conn(connection, board_id, user_id, "create_sprint", "sprint", sprint_id, normalized_name)
+    return {
+        "id": str(sprint_id),
+        "name": normalized_name,
+        "goal": goal.strip(),
+        "start_date": start_date,
+        "end_date": end_date,
+        "status": "planning",
+    }
+
+
+def update_sprint(
+    user_id: int,
+    board_id: int,
+    sprint_id: int,
+    *,
+    name: str | None = None,
+    goal: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, object]:
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        row = _get_sprint(connection, board_id, sprint_id)
+        if str(row["status"]) == "completed":
+            raise ValidationError("Cannot update a completed sprint")
+
+        new_name = str(row["name"])
+        new_goal = str(row["goal"])
+        new_start = row["start_date"]
+        new_end = row["end_date"]
+
+        if name is not None:
+            new_name = _normalize_non_empty(name, "Sprint name")
+            dup = connection.execute(
+                "SELECT id FROM sprints WHERE board_id = ? AND name = ? AND id != ?",
+                (board_id, new_name, sprint_id),
+            ).fetchone()
+            if dup is not None:
+                raise ValidationError("A sprint with that name already exists")
+        if goal is not None:
+            new_goal = goal.strip()
+        if start_date is not None:
+            new_start = start_date
+        if end_date is not None:
+            new_end = end_date
+
+        connection.execute(
+            """
+            UPDATE sprints SET name = ?, goal = ?, start_date = ?, end_date = ?,
+                               updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (new_name, new_goal, new_start, new_end, sprint_id),
+        )
+        _log_activity_conn(connection, board_id, user_id, "update_sprint", "sprint", sprint_id, new_name)
+    return {
+        "id": str(sprint_id),
+        "name": new_name,
+        "goal": new_goal,
+        "start_date": new_start,
+        "end_date": new_end,
+        "status": str(row["status"]),
+    }
+
+
+def delete_sprint(user_id: int, board_id: int, sprint_id: int) -> None:
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        row = _get_sprint(connection, board_id, sprint_id)
+        if str(row["status"]) == "active":
+            raise ValidationError("Cannot delete an active sprint; complete or cancel it first")
+        # Unassign cards from this sprint before deleting
+        connection.execute("UPDATE cards SET sprint_id = NULL WHERE sprint_id = ?", (sprint_id,))
+        connection.execute("DELETE FROM sprints WHERE id = ?", (sprint_id,))
+        _log_activity_conn(connection, board_id, user_id, "delete_sprint", "sprint", sprint_id, str(row["name"]))
+
+
+def start_sprint(user_id: int, board_id: int, sprint_id: int) -> dict[str, object]:
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        row = _get_sprint(connection, board_id, sprint_id)
+        if str(row["status"]) != "planning":
+            raise ValidationError("Only a sprint in planning status can be started")
+        # Only one active sprint per board allowed
+        active = connection.execute(
+            "SELECT id FROM sprints WHERE board_id = ? AND status = 'active'",
+            (board_id,),
+        ).fetchone()
+        if active is not None:
+            raise ValidationError("A sprint is already active on this board")
+        connection.execute(
+            "UPDATE sprints SET status = 'active', updated_at = datetime('now') WHERE id = ?",
+            (sprint_id,),
+        )
+        _log_activity_conn(connection, board_id, user_id, "start_sprint", "sprint", sprint_id, str(row["name"]))
+    return {"id": str(sprint_id), "status": "active"}
+
+
+def complete_sprint(user_id: int, board_id: int, sprint_id: int) -> dict[str, object]:
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        row = _get_sprint(connection, board_id, sprint_id)
+        if str(row["status"]) != "active":
+            raise ValidationError("Only an active sprint can be completed")
+        connection.execute(
+            "UPDATE sprints SET status = 'completed', updated_at = datetime('now') WHERE id = ?",
+            (sprint_id,),
+        )
+        _log_activity_conn(connection, board_id, user_id, "complete_sprint", "sprint", sprint_id, str(row["name"]))
+    return {"id": str(sprint_id), "status": "completed"}
+
+
+def get_sprint_stats(user_id: int, board_id: int, sprint_id: int) -> dict[str, object]:
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        sprint = _get_sprint(connection, board_id, sprint_id)
+
+        col_rows = connection.execute(
+            """
+            SELECT bc.title, COUNT(c.id) AS card_count,
+                   COALESCE(SUM(c.estimate), 0) AS total_estimate
+            FROM board_columns bc
+            LEFT JOIN cards c ON c.column_id = bc.id
+                              AND c.sprint_id = ?
+                              AND c.archived = 0
+            WHERE bc.board_id = ?
+            GROUP BY bc.id, bc.title
+            ORDER BY bc.position ASC
+            """,
+            (sprint_id, board_id),
+        ).fetchall()
+
+        total_row = connection.execute(
+            """
+            SELECT COUNT(*) AS cnt,
+                   COALESCE(SUM(estimate), 0) AS total_estimate
+            FROM cards WHERE sprint_id = ? AND archived = 0
+            """,
+            (sprint_id,),
+        ).fetchone()
+
+    return {
+        "id": str(sprint["id"]),
+        "name": str(sprint["name"]),
+        "status": str(sprint["status"]),
+        "total_cards": int(total_row["cnt"]) if total_row else 0,
+        "total_estimate": int(total_row["total_estimate"]) if total_row else 0,
+        "cards_per_column": [
+            {
+                "title": str(r["title"]),
+                "count": int(r["card_count"]),
+                "total_estimate": int(r["total_estimate"]),
+            }
+            for r in col_rows
+        ],
+    }
 
 
 SESSION_LIFETIME_SECONDS = 24 * 60 * 60  # 24 hours

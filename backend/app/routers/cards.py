@@ -28,6 +28,7 @@ def create_card(request: Request, board_id: str, payload: CreateCardPayload) -> 
             labels=payload.labels,
             assignee_id=_parse_assignee_id(payload.assignee_id),
             estimate=payload.estimate,
+            sprint_id=_parse_assignee_id(payload.sprint_id),
         )
     except db.ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -54,6 +55,7 @@ def update_card(
             labels=payload.labels,
             assignee_id=_parse_assignee_id(payload.assignee_id),
             estimate=payload.estimate,
+            sprint_id=_parse_assignee_id(payload.sprint_id),
         )
     except db.ValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -1,5 +1,15 @@
 export type Priority = "low" | "medium" | "high" | "critical";
 
+export type Sprint = {
+  id: string;
+  name: string;
+  goal: string;
+  start_date: string | null;
+  end_date: string | null;
+  status: "planning" | "active" | "completed";
+  createdAt?: string;
+};
+
 export type Card = {
   id: string;
   title: string;
@@ -11,6 +21,8 @@ export type Card = {
   assignee_username?: string | null;
   estimate?: number | null;
   is_blocked?: boolean;
+  sprint_id?: string | null;
+  sprint_name?: string | null;
 };
 
 export type CardDependency = {
