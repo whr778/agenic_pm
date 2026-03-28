@@ -15,6 +15,7 @@ import {
 } from "@dnd-kit/core";
 import { KanbanColumn } from "@/components/KanbanColumn";
 import { KanbanCardPreview } from "@/components/KanbanCardPreview";
+import { KeyboardShortcutsOverlay } from "@/components/KeyboardShortcutsOverlay";
 import {
   initialData,
   type ActivityEntry,
@@ -61,6 +62,10 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
   const [activityLog, setActivityLog] = useState<ActivityEntry[]>([]);
   const [activityLoading, setActivityLoading] = useState(false);
 
+  // Keyboard shortcuts overlay
+  const [showShortcuts, setShowShortcuts] = useState(false);
+
+  const filterInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const api = useCallback(async (path: string, init?: RequestInit) => {
@@ -151,6 +156,40 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
   useEffect(() => {
     setBoardNameDraft(board?.name ?? initialData.name);
   }, [board?.name]);
+
+  const keyboardActionsRef = useRef({
+    toggleShortcuts: () => setShowShortcuts((v) => !v),
+    closeShortcuts: () => setShowShortcuts(false),
+    focusFilter: () => filterInputRef.current?.focus(),
+    toggleArchived: () => { /* filled below */ },
+    toggleActivity: () => { /* filled below */ },
+  });
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const inInput =
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable;
+
+      if (e.key === "?" && !inInput) {
+        keyboardActionsRef.current.toggleShortcuts();
+      } else if (e.key === "Escape") {
+        keyboardActionsRef.current.closeShortcuts();
+      } else if (e.key === "f" && !inInput) {
+        e.preventDefault();
+        keyboardActionsRef.current.focusFilter();
+      } else if (e.key === "a" && !inInput) {
+        keyboardActionsRef.current.toggleArchived();
+      } else if (e.key === "l" && !inInput) {
+        keyboardActionsRef.current.toggleActivity();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -343,6 +382,10 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
     setShowActivity(next);
     if (next) void loadActivity();
   };
+
+  // Keep keyboard action refs fresh
+  keyboardActionsRef.current.toggleArchived = handleToggleArchived;
+  keyboardActionsRef.current.toggleActivity = handleToggleActivity;
 
   const handleEditCard = async (
     cardId: string,
@@ -586,11 +629,21 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
             >
               Export CSV
             </button>
+            <button
+              type="button"
+              onClick={() => setShowShortcuts(true)}
+              className="ml-auto rounded-xl border border-[var(--stroke)] px-3 py-2 text-sm font-semibold text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+              aria-label="Show keyboard shortcuts"
+              data-testid="shortcuts-btn"
+            >
+              ?
+            </button>
           </div>
 
           {/* Filter bar */}
           <div className="flex flex-wrap items-center gap-3" data-testid="filter-bar">
             <input
+              ref={filterInputRef}
               value={filterText}
               onChange={(e) => setFilterText(e.target.value)}
               placeholder="Search cards..."
@@ -661,6 +714,7 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
                   column={column}
                   boardId={boardId}
                   assignableUsers={assignableUsers}
+                  boardCards={safeBoard.cards}
                   cards={column.cardIds.map((cardId) => safeBoard.cards[cardId]).filter(Boolean)}
                   isFirstColumn={colIdx === 0}
                   isLastColumn={colIdx === safeBoard.columns.length - 1}
@@ -821,6 +875,9 @@ export const KanbanBoard = ({ boardId }: { boardId: string }) => {
           </DragOverlay>
         </DndContext>
       </main>
+      {showShortcuts && (
+        <KeyboardShortcutsOverlay onClose={() => setShowShortcuts(false)} />
+      )}
     </div>
   );
 };

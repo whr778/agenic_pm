@@ -56,6 +56,18 @@ beforeEach(() => {
       return new Response(JSON.stringify([]), { status: 200 });
     }
 
+    if (url.includes("/dependencies") && method === "GET") {
+      return new Response(JSON.stringify({ blocks: [], blocked_by: [] }), { status: 200 });
+    }
+
+    if (url.match(/\/boards\/\d+\/dependencies$/) && method === "POST") {
+      return new Response(JSON.stringify({ id: "d1", blocker_id: "1", blocked_id: "2" }), { status: 200 });
+    }
+
+    if (url.match(/\/dependencies\/\d+$/) && method === "DELETE") {
+      return new Response(JSON.stringify({ status: "deleted" }), { status: 200 });
+    }
+
     if (url.includes("/checklist") && method === "POST" && !url.match(/\/checklist\/\d+/)) {
       const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
       return new Response(
@@ -1104,5 +1116,99 @@ describe("KanbanBoard", () => {
 
     await userEvent.click(within(card1).getByRole("button", { name: /hide checklist/i }));
     expect(within(card1).queryByTestId("checklist-1")).not.toBeInTheDocument();
+  });
+
+  it("shows blocked badge when card has is_blocked true", async () => {
+    const payload = structuredClone(boardPayload);
+    payload.cards["1"] = { ...payload.cards["1"], is_blocked: true };
+
+    vi.mocked(global.fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/api/users") return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/stats")) return new Response(JSON.stringify(mockStats), { status: 200 });
+      if (url.includes("/checklist")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/dependencies")) return new Response(JSON.stringify({ blocks: [], blocked_by: [] }), { status: 200 });
+      if (url.includes("/comments")) return new Response(JSON.stringify([]), { status: 200 });
+      if (url.includes("/api/board") && method === "GET") return new Response(JSON.stringify(payload), { status: 200 });
+      if (url.includes("/api/chat")) return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      return new Response(JSON.stringify({ detail: "Not found" }), { status: 404 });
+    });
+
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    expect(await screen.findByTestId("card-blocked-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("card-blocked-2")).not.toBeInTheDocument();
+  });
+
+  it("shows dependencies panel when Dependencies button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const card1 = screen.getByTestId("card-1");
+    await userEvent.click(within(card1).getByRole("button", { name: /show dependencies for card one/i }));
+
+    expect(await within(card1).findByTestId("deps-1")).toBeInTheDocument();
+  });
+
+  it("hides dependencies panel when hide deps button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    const card1 = screen.getByTestId("card-1");
+    await userEvent.click(within(card1).getByRole("button", { name: /show dependencies for card one/i }));
+    await within(card1).findByTestId("deps-1");
+
+    await userEvent.click(within(card1).getByRole("button", { name: /hide dependencies/i }));
+    expect(within(card1).queryByTestId("deps-1")).not.toBeInTheDocument();
+  });
+
+  it("shows shortcuts button in action bar", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    expect(screen.getByTestId("shortcuts-btn")).toBeInTheDocument();
+  });
+
+  it("opens keyboard shortcuts overlay when ? button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("shortcuts-btn"));
+    expect(await screen.findByTestId("shortcuts-overlay")).toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+  });
+
+  it("closes shortcuts overlay when Close button is clicked", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("shortcuts-btn"));
+    await screen.findByTestId("shortcuts-overlay");
+
+    await userEvent.click(screen.getByLabelText("Close keyboard shortcuts"));
+    expect(screen.queryByTestId("shortcuts-overlay")).not.toBeInTheDocument();
+  });
+
+  it("opens shortcuts overlay with ? keyboard shortcut", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.keyboard("?");
+    expect(await screen.findByTestId("shortcuts-overlay")).toBeInTheDocument();
+  });
+
+  it("closes shortcuts overlay with Escape key", async () => {
+    render(<KanbanBoard boardId="1" />);
+    await screen.findAllByTestId(/column-/i);
+
+    await userEvent.click(screen.getByTestId("shortcuts-btn"));
+    await screen.findByTestId("shortcuts-overlay");
+
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByTestId("shortcuts-overlay")).not.toBeInTheDocument();
+    });
   });
 });

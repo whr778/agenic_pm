@@ -285,6 +285,21 @@ def init_db() -> None:
             );
 
             CREATE INDEX IF NOT EXISTS idx_card_checklists_card_id ON card_checklists(card_id);
+
+            CREATE TABLE IF NOT EXISTS card_dependencies (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              blocker_id INTEGER NOT NULL,
+              blocked_id INTEGER NOT NULL,
+              board_id INTEGER NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              FOREIGN KEY (blocker_id) REFERENCES cards(id) ON DELETE CASCADE,
+              FOREIGN KEY (blocked_id) REFERENCES cards(id) ON DELETE CASCADE,
+              FOREIGN KEY (board_id) REFERENCES boards(id) ON DELETE CASCADE,
+              UNIQUE(blocker_id, blocked_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_card_deps_blocker ON card_dependencies(blocker_id);
+            CREATE INDEX IF NOT EXISTS idx_card_deps_blocked ON card_dependencies(blocked_id);
             """
         )
 
@@ -617,7 +632,11 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
             """
             SELECT c.id, c.column_id, c.title, c.details, c.position,
                    c.due_date, c.priority, c.labels, c.assignee_id, c.estimate,
-                   u.username AS assignee_username
+                   u.username AS assignee_username,
+                   EXISTS(
+                     SELECT 1 FROM card_dependencies cd
+                     WHERE cd.blocked_id = c.id AND cd.board_id = c.board_id
+                   ) AS is_blocked
             FROM cards c
             LEFT JOIN users u ON c.assignee_id = u.id
             WHERE c.board_id = ? AND c.archived = 0
@@ -650,6 +669,7 @@ def get_board_payload(user_id: int, board_id: int) -> dict[str, object]:
                 "assignee_id": str(card["assignee_id"]) if card["assignee_id"] else None,
                 "assignee_username": card["assignee_username"],
                 "estimate": int(card["estimate"]) if card["estimate"] is not None else None,
+                "is_blocked": bool(card["is_blocked"]),
             }
 
         columns_payload = [
@@ -1492,6 +1512,126 @@ def delete_checklist_item(user_id: int, board_id: int, card_id: int, item_id: in
         if row is None:
             raise NotFoundError("Checklist item not found")
         connection.execute("DELETE FROM card_checklists WHERE id = ?", (item_id,))
+
+
+def _get_card_on_board(connection: sqlite3.Connection, board_id: int, card_id: int) -> sqlite3.Row:
+    row = connection.execute(
+        "SELECT id, title FROM cards WHERE id = ? AND board_id = ? AND archived = 0",
+        (card_id, board_id),
+    ).fetchone()
+    if row is None:
+        raise NotFoundError("Card not found")
+    return row
+
+
+def _has_path(connection: sqlite3.Connection, from_id: int, to_id: int, board_id: int) -> bool:
+    """Return True if there is a directed path from from_id to to_id in the dependency graph."""
+    visited: set[int] = set()
+    stack = [from_id]
+    while stack:
+        current = stack.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        rows = connection.execute(
+            "SELECT blocked_id FROM card_dependencies WHERE blocker_id = ? AND board_id = ?",
+            (current, board_id),
+        ).fetchall()
+        for r in rows:
+            nxt = int(r["blocked_id"])
+            if nxt == to_id:
+                return True
+            stack.append(nxt)
+    return False
+
+
+def get_card_dependencies(user_id: int, board_id: int, card_id: int) -> dict[str, object]:
+    """Return {blocks: [...], blocked_by: [...]} for a card."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        _get_card_on_board(connection, board_id, card_id)
+
+        blocks_rows = connection.execute(
+            """
+            SELECT cd.id, c.id AS card_id, c.title
+            FROM card_dependencies cd
+            JOIN cards c ON cd.blocked_id = c.id
+            WHERE cd.blocker_id = ? AND cd.board_id = ?
+            ORDER BY c.title ASC
+            """,
+            (card_id, board_id),
+        ).fetchall()
+
+        blocked_by_rows = connection.execute(
+            """
+            SELECT cd.id, c.id AS card_id, c.title
+            FROM card_dependencies cd
+            JOIN cards c ON cd.blocker_id = c.id
+            WHERE cd.blocked_id = ? AND cd.board_id = ?
+            ORDER BY c.title ASC
+            """,
+            (card_id, board_id),
+        ).fetchall()
+
+    def _row_to_dict(r: sqlite3.Row) -> dict[str, object]:
+        return {"id": str(r["id"]), "card_id": str(r["card_id"]), "title": str(r["title"])}
+
+    return {
+        "blocks": [_row_to_dict(r) for r in blocks_rows],
+        "blocked_by": [_row_to_dict(r) for r in blocked_by_rows],
+    }
+
+
+def add_card_dependency(
+    user_id: int, board_id: int, blocker_id: int, blocked_id: int
+) -> dict[str, object]:
+    """Record that blocker_id blocks blocked_id."""
+    if blocker_id == blocked_id:
+        raise ValidationError("A card cannot block itself")
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        _get_card_on_board(connection, board_id, blocker_id)
+        _get_card_on_board(connection, board_id, blocked_id)
+
+        # Check for existing
+        existing = connection.execute(
+            "SELECT id FROM card_dependencies WHERE blocker_id = ? AND blocked_id = ?",
+            (blocker_id, blocked_id),
+        ).fetchone()
+        if existing is not None:
+            raise ValidationError("Dependency already exists")
+
+        # Cycle detection: would adding blocker->blocked create a cycle?
+        # A cycle exists if blocked can already reach blocker (i.e. blocked_id -> ... -> blocker_id)
+        if _has_path(connection, blocked_id, blocker_id, board_id):
+            raise ValidationError("Adding this dependency would create a circular dependency")
+
+        cursor = connection.execute(
+            "INSERT INTO card_dependencies (blocker_id, blocked_id, board_id) VALUES (?, ?, ?)",
+            (blocker_id, blocked_id, board_id),
+        )
+        dep_id = int(cursor.lastrowid or 0)
+        _log_activity_conn(
+            connection, board_id, user_id, "add_dependency", "card", blocker_id,
+            f"blocks {blocked_id}",
+        )
+    return {"id": str(dep_id), "blocker_id": str(blocker_id), "blocked_id": str(blocked_id)}
+
+
+def remove_card_dependency(user_id: int, board_id: int, dep_id: int) -> None:
+    """Remove a dependency by its ID."""
+    with get_connection() as connection:
+        _get_board(connection, user_id, board_id)
+        row = connection.execute(
+            "SELECT id, blocker_id FROM card_dependencies WHERE id = ? AND board_id = ?",
+            (dep_id, board_id),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("Dependency not found")
+        _log_activity_conn(
+            connection, board_id, user_id, "remove_dependency", "card", int(row["blocker_id"]),
+        )
+        connection.execute("DELETE FROM card_dependencies WHERE id = ?", (dep_id,))
 
 
 SESSION_LIFETIME_SECONDS = 24 * 60 * 60  # 24 hours

@@ -10,6 +10,13 @@ export type Card = {
   assignee_id?: string | null;
   assignee_username?: string | null;
   estimate?: number | null;
+  is_blocked?: boolean;
+};
+
+export type CardDependency = {
+  id: string;
+  card_id: string;
+  title: string;
 };
 
 export type ChecklistItem = {

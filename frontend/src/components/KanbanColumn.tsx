@@ -11,12 +11,13 @@ type KanbanColumnProps = {
   cards: Card[];
   boardId: string;
   assignableUsers: AssignableUser[];
+  boardCards: Record<string, Card>;
   isFirstColumn?: boolean;
   isLastColumn?: boolean;
   onRename: (columnId: string, title: string) => void;
   onAddCard: (columnId: string, title: string, details: string) => void;
   onArchiveCard: (columnId: string, cardId: string) => void;
-  onEditCard: (cardId: string, title: string, details: string, due_date: string | null, priority: Priority | null, labels: string[], assignee_id: string | null) => void;
+  onEditCard: (cardId: string, title: string, details: string, due_date: string | null, priority: Priority | null, labels: string[], assignee_id: string | null, estimate: number | null) => void;
   onMoveCard?: (cardId: string, direction: MoveDirection) => void;
 };
 
@@ -25,6 +26,7 @@ export const KanbanColumn = ({
   cards,
   boardId,
   assignableUsers,
+  boardCards,
   isFirstColumn = false,
   isLastColumn = false,
   onRename,
@@ -106,6 +108,7 @@ export const KanbanColumn = ({
               card={card}
               boardId={boardId}
               assignableUsers={assignableUsers}
+              boardCards={boardCards}
               onArchive={(cardId) => onArchiveCard(column.id, cardId)}
               onEdit={onEditCard}
               onMove={onMoveCard}

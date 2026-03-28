@@ -1911,3 +1911,167 @@ def test_checklist_items_deleted_with_card(client: TestClient) -> None:
     # Card is gone; list should return 404
     response = client.get(f"/api/boards/{board_id}/cards/{card_id}/checklist")
     assert response.status_code == 404
+
+
+# --- Card dependencies ---
+
+
+def _get_two_card_ids(client: TestClient) -> tuple[str, str]:
+    login(client)
+    board_id = get_board_id(client)
+    board = client.get(f"/api/board/{board_id}").json()
+    col = board["columns"][0]
+    card_a = col["cardIds"][0]
+    card_b = col["cardIds"][1]
+    return board_id, card_a, card_b  # type: ignore[return-value]
+
+
+def test_dependencies_require_auth(client: TestClient) -> None:
+    response = client.get("/api/boards/1/cards/1/dependencies")
+    assert response.status_code == 401
+
+
+def test_get_dependencies_card_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.get(f"/api/boards/{board_id}/cards/99999/dependencies")
+    assert response.status_code == 404
+
+
+def test_add_and_get_dependency(client: TestClient) -> None:
+    board_id, card_a, card_b = _get_two_card_ids(client)
+
+    response = client.post(
+        f"/api/boards/{board_id}/dependencies",
+        json={"blocker_id": card_a, "blocked_id": card_b},
+    )
+    assert response.status_code == 200
+    dep = response.json()
+    assert dep["blocker_id"] == card_a
+    assert dep["blocked_id"] == card_b
+    assert "id" in dep
+
+    deps_a = client.get(f"/api/boards/{board_id}/cards/{card_a}/dependencies").json()
+    assert len(deps_a["blocks"]) == 1
+    assert deps_a["blocks"][0]["card_id"] == card_b
+    assert deps_a["blocked_by"] == []
+
+    deps_b = client.get(f"/api/boards/{board_id}/cards/{card_b}/dependencies").json()
+    assert len(deps_b["blocked_by"]) == 1
+    assert deps_b["blocked_by"][0]["card_id"] == card_a
+    assert deps_b["blocks"] == []
+
+
+def test_blocked_card_has_is_blocked_true_in_board_payload(client: TestClient) -> None:
+    board_id, card_a, card_b = _get_two_card_ids(client)
+
+    client.post(
+        f"/api/boards/{board_id}/dependencies",
+        json={"blocker_id": card_a, "blocked_id": card_b},
+    )
+
+    board = client.get(f"/api/board/{board_id}").json()
+    assert board["cards"][card_a]["is_blocked"] is False
+    assert board["cards"][card_b]["is_blocked"] is True
+
+
+def test_remove_dependency(client: TestClient) -> None:
+    board_id, card_a, card_b = _get_two_card_ids(client)
+
+    dep_id = client.post(
+        f"/api/boards/{board_id}/dependencies",
+        json={"blocker_id": card_a, "blocked_id": card_b},
+    ).json()["id"]
+
+    delete = client.delete(f"/api/boards/{board_id}/dependencies/{dep_id}")
+    assert delete.status_code == 200
+
+    deps = client.get(f"/api/boards/{board_id}/cards/{card_a}/dependencies").json()
+    assert deps["blocks"] == []
+
+
+def test_dependency_self_reference_rejected(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    card_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["cardIds"][0]
+
+    response = client.post(
+        f"/api/boards/{board_id}/dependencies",
+        json={"blocker_id": card_id, "blocked_id": card_id},
+    )
+    assert response.status_code == 400
+    assert "itself" in response.json()["detail"].lower()
+
+
+def test_duplicate_dependency_rejected(client: TestClient) -> None:
+    board_id, card_a, card_b = _get_two_card_ids(client)
+
+    client.post(
+        f"/api/boards/{board_id}/dependencies",
+        json={"blocker_id": card_a, "blocked_id": card_b},
+    )
+    response = client.post(
+        f"/api/boards/{board_id}/dependencies",
+        json={"blocker_id": card_a, "blocked_id": card_b},
+    )
+    assert response.status_code == 400
+
+
+def test_circular_dependency_rejected(client: TestClient) -> None:
+    board_id, card_a, card_b = _get_two_card_ids(client)
+
+    # A blocks B
+    client.post(
+        f"/api/boards/{board_id}/dependencies",
+        json={"blocker_id": card_a, "blocked_id": card_b},
+    )
+
+    # B blocks A (circular) — should be rejected
+    response = client.post(
+        f"/api/boards/{board_id}/dependencies",
+        json={"blocker_id": card_b, "blocked_id": card_a},
+    )
+    assert response.status_code == 400
+    assert "circular" in response.json()["detail"].lower()
+
+
+def test_transitive_circular_dependency_rejected(client: TestClient) -> None:
+    """A blocks B, B blocks C — C blocks A should be rejected."""
+    login(client)
+    board_id = get_board_id(client)
+    col_id = client.get(f"/api/board/{board_id}").json()["columns"][0]["id"]
+
+    c1 = client.post(f"/api/boards/{board_id}/cards", json={"columnId": col_id, "title": "C1", "details": ""}).json()["id"]
+    c2 = client.post(f"/api/boards/{board_id}/cards", json={"columnId": col_id, "title": "C2", "details": ""}).json()["id"]
+    c3 = client.post(f"/api/boards/{board_id}/cards", json={"columnId": col_id, "title": "C3", "details": ""}).json()["id"]
+
+    client.post(f"/api/boards/{board_id}/dependencies", json={"blocker_id": c1, "blocked_id": c2})
+    client.post(f"/api/boards/{board_id}/dependencies", json={"blocker_id": c2, "blocked_id": c3})
+
+    response = client.post(f"/api/boards/{board_id}/dependencies", json={"blocker_id": c3, "blocked_id": c1})
+    assert response.status_code == 400
+    assert "circular" in response.json()["detail"].lower()
+
+
+def test_remove_dependency_not_found(client: TestClient) -> None:
+    login(client)
+    board_id = get_board_id(client)
+    response = client.delete(f"/api/boards/{board_id}/dependencies/99999")
+    assert response.status_code == 404
+
+
+def test_add_dependency_requires_auth(client: TestClient) -> None:
+    response = client.post("/api/boards/1/dependencies", json={"blocker_id": "1", "blocked_id": "2"})
+    assert response.status_code == 401
+
+
+def test_dependency_activity_logged(client: TestClient) -> None:
+    board_id, card_a, card_b = _get_two_card_ids(client)
+
+    client.post(
+        f"/api/boards/{board_id}/dependencies",
+        json={"blocker_id": card_a, "blocked_id": card_b},
+    )
+
+    log = client.get(f"/api/boards/{board_id}/activity").json()
+    assert any(e["action"] == "add_dependency" for e in log)

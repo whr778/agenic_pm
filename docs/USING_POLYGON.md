@@ -14,5 +14,5 @@ claude mcp add massive -e MASSIVE_API_KEY="uTRwyNRjCWjLQG8m_RJWvYvjLNIOc45h" -- 
 #
 uv tool upgrade mcp_massive
 
-# to remove
+# to remove1
 claude mcp remove massive

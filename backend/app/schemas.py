@@ -87,3 +87,8 @@ class AddChecklistItemPayload(BaseModel):
 class UpdateChecklistItemPayload(BaseModel):
     text: str | None = Field(default=None, max_length=1000)
     checked: bool | None = None
+
+
+class AddDependencyPayload(BaseModel):
+    blocker_id: str = Field(max_length=20)
+    blocked_id: str = Field(max_length=20)

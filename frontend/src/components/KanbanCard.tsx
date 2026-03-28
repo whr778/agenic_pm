@@ -2,7 +2,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import clsx from "clsx";
 import { useEffect, useRef, useState } from "react";
-import type { AssignableUser, Card, ChecklistItem, Comment, Priority } from "@/lib/kanban";
+import type { AssignableUser, Card, CardDependency, ChecklistItem, Comment, Priority } from "@/lib/kanban";
 
 export type MoveDirection = "up" | "down" | "left" | "right";
 
@@ -10,6 +10,7 @@ type KanbanCardProps = {
   card: Card;
   boardId: string;
   assignableUsers: AssignableUser[];
+  boardCards: Record<string, Card>;
   onArchive: (cardId: string) => void;
   onEdit: (
     cardId: string,
@@ -78,6 +79,7 @@ export const KanbanCard = ({
   card,
   boardId,
   assignableUsers,
+  boardCards,
   onArchive,
   onEdit,
   onMove,
@@ -102,6 +104,15 @@ export const KanbanCard = ({
   const [checklistInput, setChecklistInput] = useState("");
   const [checklistSubmitting, setChecklistSubmitting] = useState(false);
 
+  // Dependencies state
+  const [showDeps, setShowDeps] = useState(false);
+  const [blocks, setBlocks] = useState<CardDependency[]>([]);
+  const [blockedBy, setBlockedBy] = useState<CardDependency[]>([]);
+  const [depsLoaded, setDepsLoaded] = useState(false);
+  const [depPickMode, setDepPickMode] = useState<"blocks" | "blocked_by" | null>(null);
+  const [depPickCardId, setDepPickCardId] = useState("");
+  const [depError, setDepError] = useState<string | null>(null);
+
   // Comments state
   const [showComments, setShowComments] = useState(false);
   const [comments, setComments] = useState<Comment[]>([]);
@@ -121,6 +132,21 @@ export const KanbanCard = ({
     setDraftAssigneeId(card.assignee_id ?? "");
     setDraftEstimate(card.estimate != null ? String(card.estimate) : "");
   }, [card.title, card.details, card.due_date, card.priority, card.labels, card.assignee_id, card.estimate]);
+
+  useEffect(() => {
+    if (showDeps && !depsLoaded) {
+      void fetch(`/api/boards/${boardId}/cards/${card.id}/dependencies`, { credentials: "include" })
+        .then((r) => r.json())
+        .then((data: { blocks: CardDependency[]; blocked_by: CardDependency[] }) => {
+          setBlocks(data.blocks ?? []);
+          setBlockedBy(data.blocked_by ?? []);
+          setDepsLoaded(true);
+        })
+        .catch(() => {
+          setDepsLoaded(true);
+        });
+    }
+  }, [showDeps, depsLoaded, boardId, card.id]);
 
   useEffect(() => {
     if (showChecklist && !checklistLoaded) {
@@ -222,6 +248,50 @@ export const KanbanCard = ({
       setCommentError(err instanceof Error ? err.message : "Failed to add comment");
     } finally {
       setCommentSubmitting(false);
+    }
+  };
+
+  const handleAddDependency = async () => {
+    if (!depPickMode || !depPickCardId) return;
+    const blocker_id = depPickMode === "blocks" ? card.id : depPickCardId;
+    const blocked_id = depPickMode === "blocks" ? depPickCardId : card.id;
+    setDepError(null);
+    try {
+      const response = await fetch(`/api/boards/${boardId}/dependencies`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ blocker_id, blocked_id }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json()) as { detail?: string };
+        throw new Error(payload.detail ?? "Failed to add dependency");
+      }
+      // Reload deps
+      const refreshed = await fetch(`/api/boards/${boardId}/cards/${card.id}/dependencies`, {
+        credentials: "include",
+      });
+      const data = (await refreshed.json()) as { blocks: CardDependency[]; blocked_by: CardDependency[] };
+      setBlocks(data.blocks ?? []);
+      setBlockedBy(data.blocked_by ?? []);
+      setDepPickMode(null);
+      setDepPickCardId("");
+    } catch (err) {
+      setDepError(err instanceof Error ? err.message : "Failed to add dependency");
+    }
+  };
+
+  const handleRemoveDependency = async (depId: string) => {
+    setDepError(null);
+    try {
+      await fetch(`/api/boards/${boardId}/dependencies/${depId}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      setBlocks((prev) => prev.filter((d) => d.id !== depId));
+      setBlockedBy((prev) => prev.filter((d) => d.id !== depId));
+    } catch {
+      setDepError("Failed to remove dependency");
     }
   };
 
@@ -407,9 +477,17 @@ export const KanbanCard = ({
         ) : (
           <>
             <div className="min-w-0 flex-1">
-              {/* Priority + Labels row */}
-              {(card.priority || (card.labels && card.labels.length > 0)) && (
+              {/* Priority + Labels + Blocked row */}
+              {(card.priority || (card.labels && card.labels.length > 0) || card.is_blocked) && (
                 <div className="mb-2 flex flex-wrap gap-1">
+                  {card.is_blocked && (
+                    <span
+                      className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-700"
+                      data-testid={`card-blocked-${card.id}`}
+                    >
+                      Blocked
+                    </span>
+                  )}
                   {card.priority && (
                     <span className={clsx("rounded-full px-2 py-0.5 text-xs font-semibold capitalize", PRIORITY_COLORS[card.priority])}>
                       {card.priority}
@@ -489,6 +567,14 @@ export const KanbanCard = ({
               </button>
               <button
                 type="button"
+                onClick={() => setShowDeps((v) => !v)}
+                className="rounded-full border border-transparent px-3 py-1 text-xs font-semibold text-[var(--gray-text)] transition hover:border-[var(--stroke)] hover:text-[var(--navy-dark)]"
+                aria-label={`${showDeps ? "Hide" : "Show"} dependencies for ${card.title}`}
+              >
+                {showDeps ? "Hide deps" : "Dependencies"}
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   setShowComments((v) => !v);
                 }}
@@ -519,6 +605,101 @@ export const KanbanCard = ({
                 </div>
               )}
             </div>
+
+            {showDeps && (
+              <div className="mt-2 space-y-2 border-t border-[var(--stroke)] pt-2" data-testid={`deps-${card.id}`}>
+                {depError && (
+                  <p className="text-xs text-red-600" role="alert">{depError}</p>
+                )}
+                {blockedBy.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-[var(--gray-text)]">Blocked by</p>
+                    {blockedBy.map((dep) => (
+                      <div key={dep.id} className="flex items-center justify-between gap-2 py-0.5">
+                        <span className="flex-1 text-xs text-[var(--navy-dark)]">{dep.title}</span>
+                        <button
+                          type="button"
+                          onClick={() => void handleRemoveDependency(dep.id)}
+                          className="text-[10px] text-[var(--gray-text)] hover:text-red-500"
+                          aria-label={`Remove blocked-by: ${dep.title}`}
+                        >
+                          x
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {blocks.length > 0 && (
+                  <div>
+                    <p className="text-xs font-semibold text-[var(--gray-text)]">Blocks</p>
+                    {blocks.map((dep) => (
+                      <div key={dep.id} className="flex items-center justify-between gap-2 py-0.5">
+                        <span className="flex-1 text-xs text-[var(--navy-dark)]">{dep.title}</span>
+                        <button
+                          type="button"
+                          onClick={() => void handleRemoveDependency(dep.id)}
+                          className="text-[10px] text-[var(--gray-text)] hover:text-red-500"
+                          aria-label={`Remove blocks: ${dep.title}`}
+                        >
+                          x
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {depPickMode ? (
+                  <div className="flex gap-1">
+                    <select
+                      value={depPickCardId}
+                      onChange={(e) => setDepPickCardId(e.target.value)}
+                      className="flex-1 rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs outline-none"
+                      aria-label={`Pick card to ${depPickMode === "blocks" ? "be blocked by this card" : "block this card"}`}
+                    >
+                      <option value="">Select card...</option>
+                      {Object.values(boardCards)
+                        .filter((c) => c.id !== card.id)
+                        .map((c) => (
+                          <option key={c.id} value={c.id}>{c.title}</option>
+                        ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => void handleAddDependency()}
+                      disabled={!depPickCardId}
+                      className="rounded-lg bg-[var(--primary-blue)] px-2 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setDepPickMode(null); setDepPickCardId(""); setDepError(null); }}
+                      className="rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs text-[var(--gray-text)]"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      onClick={() => { setDepPickMode("blocked_by"); setDepPickCardId(""); }}
+                      className="rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs font-semibold text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+                      aria-label="Add blocked-by dependency"
+                    >
+                      + Blocked by
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setDepPickMode("blocks"); setDepPickCardId(""); }}
+                      className="rounded-lg border border-[var(--stroke)] px-2 py-1 text-xs font-semibold text-[var(--gray-text)] hover:text-[var(--navy-dark)]"
+                      aria-label="Add blocks dependency"
+                    >
+                      + Blocks
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
 
             {showChecklist && (
               <div className="mt-2 space-y-2 border-t border-[var(--stroke)] pt-2" data-testid={`checklist-${card.id}`}>
