@@ -9,7 +9,7 @@ uv tool install "mcp_massive @ git+https://github.com/massive-com/mcp_massive@v0
 claude mcp add massive -e MASSIVE_API_KEY=your_api_key_here -- mcp_massive
 
 ## Install in claude code
-claude mcp add massive -e MASSIVE_API_KEY="uTRwyNRjCWjLQG8m_RJWvYvjLNIOc45h" -- mcp_massive
+claude mcp add massive -e MASSIVE_API_KEY=your_api_key_here -- mcp_massive
 
 #
 uv tool upgrade mcp_massive
